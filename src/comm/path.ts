@@ -39,6 +39,17 @@ export const pUploadPath = () => {
 };
 
 /**
+ * 生成图片目录
+ */
+export const pGeneratedPath = () => {
+  const generatedPath = path.resolve(process.cwd(), '../generated');
+  if (!fs.existsSync(generatedPath)) {
+    fs.mkdirSync(generatedPath, { recursive: true });
+  }
+  return generatedPath;
+};
+
+/**
  * 插件目录
  * @returns
  */

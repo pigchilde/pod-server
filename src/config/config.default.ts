@@ -2,7 +2,7 @@ import { CoolConfig } from '@cool-midway/core';
 import { MidwayConfig } from '@midwayjs/core';
 import { CoolCacheStore } from '@cool-midway/core';
 import * as path from 'path';
-import { pCachePath, pUploadPath } from '../comm/path';
+import { pCachePath, pGeneratedPath, pUploadPath } from '../comm/path';
 import { availablePort } from '../comm/port';
 
 // redis缓存
@@ -10,7 +10,7 @@ import { availablePort } from '../comm/port';
 
 export default {
   // 确保每个项目唯一，项目首次启动会自动生成
-  keys: 'cool-admin-keys-xxxxxx',
+  keys: '1a6ed68d-75e5-4bab-a550-d7974222ffe3',
   koa: {
     port: availablePort(8001),
   },
@@ -25,6 +25,10 @@ export default {
       default: {
         prefix: '/',
         dir: path.join(__dirname, '..', '..', 'public'),
+      },
+      generated: {
+        prefix: '/generated',
+        dir: pGeneratedPath(),
       },
       static: {
         prefix: '/upload',
