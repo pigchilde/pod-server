@@ -1,0 +1,126 @@
+[
+  {
+    "name": "POD生产",
+    "router": "/pod",
+    "perms": null,
+    "type": 0,
+    "icon": "icon-pic",
+    "orderNum": 1,
+    "viewPath": null,
+    "keepAlive": true,
+    "isShow": true,
+    "childMenus": [
+      {
+        "name": "批次管理",
+        "router": "/pod/generation",
+        "perms": null,
+        "type": 1,
+        "icon": "icon-pic",
+        "orderNum": 0,
+        "viewPath": "modules/pod/views/batch/index.vue",
+        "keepAlive": true,
+        "isShow": true,
+        "childMenus": [
+          {
+            "name": "查询",
+            "router": null,
+            "perms": "pod:generation:page,pod:generation:list,pod:generation:info,pod:generation:detail,pod:generation:items",
+            "type": 2,
+            "icon": null,
+            "orderNum": 1,
+            "viewPath": null,
+            "keepAlive": false,
+            "isShow": true,
+            "childMenus": []
+          },
+          {
+            "name": "新增",
+            "router": null,
+            "perms": "pod:generation:createBatch",
+            "type": 2,
+            "icon": null,
+            "orderNum": 2,
+            "viewPath": null,
+            "keepAlive": false,
+            "isShow": true,
+            "childMenus": []
+          },
+          {
+            "name": "执行",
+            "router": null,
+            "perms": "pod:generation:runBatch,pod:generation:retryFailed,pod:generation:retryItem,pod:generation:retryItems,pod:generation:updatePrompt,pod:generation:approvePrompts,pod:generation:rejectPrompts",
+            "type": 2,
+            "icon": null,
+            "orderNum": 3,
+            "viewPath": null,
+            "keepAlive": false,
+            "isShow": true,
+            "childMenus": []
+          }
+        ]
+      },
+      {
+        "name": "图片管理",
+        "router": "/pod/images",
+        "perms": null,
+        "type": 1,
+        "icon": "icon-pic",
+        "orderNum": 1,
+        "viewPath": "modules/pod/views/image/index.vue",
+        "keepAlive": true,
+        "isShow": true,
+        "childMenus": [
+          {
+            "name": "查询",
+            "router": null,
+            "perms": "pod:generation:items,pod:generation:detail",
+            "type": 2,
+            "icon": null,
+            "orderNum": 1,
+            "viewPath": null,
+            "keepAlive": false,
+            "isShow": true,
+            "childMenus": []
+          }
+        ]
+      },
+      {
+        "name": "模块设置",
+        "router": "/pod/setting",
+        "perms": null,
+        "type": 1,
+        "icon": "icon-setting",
+        "orderNum": 2,
+        "viewPath": "modules/pod/views/setting/index.vue",
+        "keepAlive": true,
+        "isShow": true,
+        "childMenus": [
+          {
+            "name": "查询",
+            "router": null,
+            "perms": "pod:setting:info",
+            "type": 2,
+            "icon": null,
+            "orderNum": 1,
+            "viewPath": null,
+            "keepAlive": false,
+            "isShow": true,
+            "childMenus": []
+          },
+          {
+            "name": "保存",
+            "router": null,
+            "perms": "pod:setting:save",
+            "type": 2,
+            "icon": null,
+            "orderNum": 2,
+            "viewPath": null,
+            "keepAlive": false,
+            "isShow": true,
+            "childMenus": []
+          }
+        ]
+      }
+    ]
+  }
+]
