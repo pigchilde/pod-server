@@ -2,6 +2,7 @@ import { Inject, Provide } from '@midwayjs/core';
 import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as sharp from 'sharp';
 import { PodSettingService, PodModuleSettings } from './setting';
 
 export interface PodGenerateImageInput {
@@ -67,7 +68,7 @@ export class PodImageService {
     const payload = res.data?.data?.[0] || res.data;
     const b64Json = payload?.b64_json || payload?.base64 || payload?.imageBase64;
     if (b64Json) {
-      return this.saveBase64(b64Json, input);
+      return this.saveBase64(b64Json, input, settings);
     }
 
     const imageUrl = payload?.url || payload?.imageUrl;
@@ -83,16 +84,21 @@ export class PodImageService {
     return this.saveBuffer(
       Buffer.from(image.data),
       input,
-      this.extensionFromContentType(String(image.headers['content-type'] || ''))
+      this.extensionFromContentType(String(image.headers['content-type'] || '')),
+      settings
     );
   }
 
-  private async saveBase64(value: string, input: PodGenerateImageInput) {
+  private async saveBase64(
+    value: string,
+    input: PodGenerateImageInput,
+    settings: PodModuleSettings
+  ) {
     // 支持纯 base64 和 data:image/png;base64 两种格式。
     const matched = value.match(/^data:image\/(\w+);base64,(.*)$/);
     const ext = matched?.[1] || 'png';
     const data = matched?.[2] || value;
-    return this.saveBuffer(Buffer.from(data, 'base64'), input, ext);
+    return this.saveBuffer(Buffer.from(data, 'base64'), input, ext, settings);
   }
 
   private async generateMock(input: PodGenerateImageInput) {
@@ -112,13 +118,16 @@ export class PodImageService {
   private async saveBuffer(
     buffer: Buffer,
     input: PodGenerateImageInput,
-    ext: string
+    ext: string,
+    settings?: PodModuleSettings
   ) {
     // 所有来源最终统一保存到批次目录，并返回前端可访问的静态 URL。
     await fs.promises.mkdir(input.outputDir, { recursive: true });
-    const fileName = `${input.seoFileName}.${ext}`;
+    const outputBuffer = await this.resizeToOutputSize(buffer, ext, settings);
+    const fileExt = settings?.generation?.outputSize ? 'png' : ext;
+    const fileName = `${input.seoFileName}.${fileExt}`;
     const filePath = path.join(input.outputDir, fileName);
-    await fs.promises.writeFile(filePath, buffer);
+    await fs.promises.writeFile(filePath, outputBuffer);
     const stat = await fs.promises.stat(filePath);
     if (stat.size <= 1024) {
       throw new Error('Generated image file is too small');
@@ -129,6 +138,32 @@ export class PodImageService {
       filePath,
       imageUrl: path.posix.join(input.publicDir, fileName),
     };
+  }
+
+  private async resizeToOutputSize(
+    buffer: Buffer,
+    ext: string,
+    settings?: PodModuleSettings
+  ) {
+    const outputSize = settings?.generation?.outputSize;
+    if (!outputSize || ext === 'svg') {
+      return buffer;
+    }
+
+    const [width, height] = outputSize.split('x').map(Number);
+    if (!width || !height) {
+      return buffer;
+    }
+
+    // sharp 会保留 PNG alpha 通道；这里强制输出 PNG，确保透明背景不被 JPEG 等格式破坏。
+    return sharp(buffer)
+      .resize(width, height, {
+        fit: 'contain',
+        kernel: 'lanczos3',
+        background: { r: 0, g: 0, b: 0, alpha: 0 },
+      })
+      .png()
+      .toBuffer();
   }
 
   private extensionFromContentType(contentType = '') {

@@ -17,7 +17,8 @@ export default () => {
       endpoint: 'https://www.right.codes/draw/v1/images/generations',
       apiKey: process.env.RIGHT_CODES_API_KEY || 'sk-112e8b3dcadb45d79d795502b4dd31d0',
       model: process.env.RIGHT_CODES_IMAGE_MODEL || 'gpt-image-2',
-      size: '2048x2048',
+      size: '1024x1024',
+      outputSize: '2048x2048',
     },
     prompt: {
       provider: 'deepseek',

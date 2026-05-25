@@ -13,6 +13,7 @@ export interface PodModuleSettings {
     apiKey: string;
     model: string;
     size: string;
+    outputSize: string;
   };
   prompt: {
     provider: string;
@@ -93,6 +94,9 @@ export class PodSettingService {
         apiKey: this.str(value?.generation?.apiKey, defaults.generation.apiKey),
         model: this.str(value?.generation?.model, defaults.generation.model),
         size: this.normalizeSize(value?.generation?.size || defaults.generation.size),
+        outputSize: this.normalizeSize(
+          value?.generation?.outputSize || defaults.generation.outputSize
+        ),
       },
       prompt: {
         provider: this.str(value?.prompt?.provider, defaults.prompt.provider),
@@ -116,7 +120,8 @@ export class PodSettingService {
           'https://www.right.codes/draw/v1/images/generations',
         apiKey: this.generationConfig?.apiKey || '',
         model: this.generationConfig?.model || 'gpt-image-2',
-        size: this.generationConfig?.size || '2048x2048',
+        size: this.generationConfig?.size || '1024x1024',
+        outputSize: this.generationConfig?.outputSize || '2048x2048',
       },
       prompt: {
         provider: this.promptConfig?.provider || 'deepseek',

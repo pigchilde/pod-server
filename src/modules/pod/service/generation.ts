@@ -363,6 +363,7 @@ export class PodGenerationService extends BaseService {
           `itemNo=${item.itemNo}`,
           `model=${settings.generation.model}`,
           `size=${settings.generation.size}`,
+          `outputSize=${settings.generation.outputSize}`,
           'prompt:',
           finalPrompt,
           '[/POD_IMAGE_PROMPT]',
