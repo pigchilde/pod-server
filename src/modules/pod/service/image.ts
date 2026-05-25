@@ -54,7 +54,7 @@ export class PodImageService {
         model: generationConfig.model || 'gpt-image-2',
         prompt: input.prompt,
         n: 1,
-        size: generationConfig.size || '2048x2048',
+        size: generationConfig.size || '1024x1024',
       },
       {
         timeout: input.timeoutMs,
