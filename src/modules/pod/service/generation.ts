@@ -69,7 +69,7 @@ export class PodGenerationService extends BaseService {
     );
     const topicSlug = this.podPromptService.slugify(topic) || 'pod-topic';
     const date = moment().format('YYYY-MM-DD');
-    const batchNo = `${moment().format('YYYYMMDD')}-${topicSlug}-${uuidv4().slice(0, 4)}`;
+    const batchNo = this.createBatchNo(topicSlug);
     const outputDir = this.resolveOutputDir(
       date,
       topicSlug,
@@ -526,6 +526,18 @@ export class PodGenerationService extends BaseService {
     }
     used.add(name);
     return name;
+  }
+
+  private createBatchNo(topicSlug: string) {
+    // batchNo 数据库字段长度为 80，长英文主题生成的 slug 需要单独截断。
+    const prefix = moment().format('YYYYMMDD');
+    const suffix = uuidv4().slice(0, 4);
+    const maxSlugLength = 80 - prefix.length - suffix.length - 2;
+    const slug =
+      String(topicSlug || 'pod-topic')
+        .slice(0, maxSlugLength)
+        .replace(/-+$/g, '') || 'pod-topic';
+    return `${prefix}-${slug}-${suffix}`;
   }
 
   private resolveOutputDir(date: string, topicSlug: string, outputDir: string) {
