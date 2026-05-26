@@ -78,12 +78,12 @@ export class PodSettingService {
   }
 
   appendUnifiedPrompt(prompt: string, settings: PodModuleSettings) {
-    // 生图前统一追加公共约束，让每条 Prompt 保持差异化内容干净可读。
+    // 生图前先放公共约束，再接每条图的差异化内容，提升模型对全局要求的遵循度。
     const unifiedPrompt = String(settings.unifiedPrompt || '').trim();
     if (!unifiedPrompt) {
       return prompt;
     }
-    return `${prompt.trim()}\n\nAdditional module-wide prompt requirements:\n${unifiedPrompt}`;
+    return `${unifiedPrompt}\n\nImage-specific prompt:\n${prompt.trim()}`;
   }
 
   private mergeSettings(value: any): PodModuleSettings {
