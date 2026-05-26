@@ -29,8 +29,7 @@ export class PodDeepseekService {
         messages: [
           {
             role: 'system',
-            content:
-              'You generate safe, original POD T-shirt print image prompts. Return strict JSON only. Avoid copyrighted characters, brands, celebrities, sports teams, trademarks, and marketplace policy risks.',
+            content: promptConfig.systemPrompt,
           },
           {
             role: 'user',
