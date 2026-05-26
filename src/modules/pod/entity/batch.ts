@@ -12,7 +12,7 @@ export class PodGenerationBatchEntity extends BaseEntity {
   @Column({ comment: '批次ID', length: 80 })
   batchNo: string;
 
-  @Column({ comment: '主题', length: 2000 })
+  @Column({ comment: '主题', type: 'text' })
   topic: string;
 
   @Index()
