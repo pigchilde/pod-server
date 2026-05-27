@@ -7,7 +7,7 @@ import { PodSettingService, PodModuleSettings } from './setting';
 
 export interface PodGenerateImageInput {
   prompt: string;
-  seoFileName: string;
+  fileBaseName: string;
   outputDir: string;
   publicDir: string;
   timeoutMs: number;
@@ -108,7 +108,7 @@ export class PodImageService {
   <circle cx="800" cy="800" r="560" fill="#171717"/>
   <circle cx="800" cy="800" r="510" fill="#f7c66a"/>
   <text x="800" y="650" text-anchor="middle" font-family="Arial, sans-serif" font-size="96" font-weight="700" fill="#171717">POD MOCK</text>
-  <text x="800" y="790" text-anchor="middle" font-family="Arial, sans-serif" font-size="62" font-weight="700" fill="#171717">${this.escapeXml(input.seoFileName)}</text>
+  <text x="800" y="790" text-anchor="middle" font-family="Arial, sans-serif" font-size="62" font-weight="700" fill="#171717">${this.escapeXml(input.fileBaseName)}</text>
   <text x="800" y="930" text-anchor="middle" font-family="Arial, sans-serif" font-size="40" fill="#171717">${this.escapeXml(input.prompt.slice(0, 80))}</text>
 </svg>`;
 
@@ -125,7 +125,7 @@ export class PodImageService {
     await fs.promises.mkdir(input.outputDir, { recursive: true });
     const outputBuffer = await this.resizeToOutputSize(buffer, ext, settings);
     const fileExt = settings?.generation?.outputSize ? 'png' : ext;
-    const fileName = `${input.seoFileName}.${fileExt}`;
+    const fileName = `${input.fileBaseName}.${fileExt}`;
     const filePath = path.join(input.outputDir, fileName);
     await fs.promises.writeFile(filePath, outputBuffer);
     const stat = await fs.promises.stat(filePath);

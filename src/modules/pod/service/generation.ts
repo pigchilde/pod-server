@@ -371,7 +371,7 @@ export class PodGenerationService extends BaseService {
       );
       const result = await this.podImageService.generate({
         prompt: finalPrompt,
-        seoFileName: item.seoFileName,
+        fileBaseName: this.getImageFileBaseName(item),
         outputDir: imageDir,
         publicDir,
         timeoutMs: batch.timeoutMs,
@@ -526,6 +526,22 @@ export class PodGenerationService extends BaseService {
     }
     used.add(name);
     return name;
+  }
+
+  private getImageFileBaseName(item: PodGenerationItemEntity) {
+    // 实际落盘文件名优先使用标题，并尽量保留标题原有大小写和空格。
+    const titleBase = this.normalizeImageFileBaseName(item.seoTitle || '');
+    return titleBase || item.seoFileName;
+  }
+
+  private normalizeImageFileBaseName(value: string) {
+    // 只清理文件系统不安全字符，保留大小写、空格和正常连字符，方便直接按标题识别图片。
+    return String(value || '')
+      .replace(/[<>:"/\\|?*\u0000-\u001f]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .replace(/[. ]+$/g, '')
+      .trim()
+      .slice(0, 180);
   }
 
   private createBatchNo(topicSlug: string) {
