@@ -231,6 +231,56 @@ export class PodGenerationService extends BaseService {
     return this.finishBatch(batchId);
   }
 
+  async cutoutItem(id: number) {
+    // 单图抠图：对已经生成成功的图片执行 ComfyUI 背景移除，并直接回写当前图片记录。
+    const item = await this.itemEntity.findOneBy({ id });
+    if (!item) {
+      throw new CoolCommException('任务项不存在');
+    }
+    if (item.status === 'running') {
+      throw new CoolCommException('生成中的图片暂时不能抠图');
+    }
+    if (item.status !== 'success') {
+      throw new CoolCommException('请先生成图片后再抠图');
+    }
+    if (!item.filePath || !fs.existsSync(item.filePath)) {
+      throw new CoolCommException('当前图片文件不存在，请先重新生成');
+    }
+
+    const batch = await this.ensureBatch(item.batchId);
+    const startedAt = Date.now();
+    await this.itemEntity.update(id, {
+      status: 'running',
+      error: null,
+    });
+
+    try {
+      const result = await this.podImageService.cutout({
+        fileName: item.fileName,
+        filePath: item.filePath,
+        imageUrl: item.imageUrl,
+      });
+
+      await this.itemEntity.update(id, {
+        ...result,
+        status: 'success',
+        durationMs: Date.now() - startedAt,
+      });
+    } catch (err) {
+      await this.itemEntity.update(id, {
+        status: 'failed',
+        error: err.message,
+        durationMs: Date.now() - startedAt,
+      });
+      throw err;
+    } finally {
+      await this.refreshBatchStats(batch.id);
+      await this.writeArtifacts(batch.id);
+    }
+
+    return this.finishBatch(batch.id);
+  }
+
   async items(query: any) {
     // 图片管理和批次详情都复用这个任务项分页接口；不要走批次表的通用分页渲染。
     const page = this.clamp(Number(query.page || 1), 1, 100000);

@@ -69,6 +69,14 @@ export class AdminPodGenerationController extends BaseController {
   }
 
   /**
+   * 对单个任务项执行抠图
+   */
+  @Post('/cutoutItem', { summary: '任务项抠图' })
+  async cutoutItem(@Body('id') id: number) {
+    return this.ok(await this.podGenerationService.cutoutItem(id));
+  }
+
+  /**
    * 更新提示词并重新置为待确认
    */
   @Post('/updatePrompt', { summary: '更新提示词' })

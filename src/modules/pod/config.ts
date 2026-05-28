@@ -26,5 +26,11 @@ export default () => {
       apiKey: process.env.DEEPSEEK_API_KEY || 'sk-27de6de884154b28a25db1aae05cbc3a',
       model: process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro',
     },
+    cutout: {
+      enabled: true,
+      endpoint: process.env.COMFYUI_ENDPOINT || 'http://127.0.0.1:8000',
+      model: process.env.COMFYUI_BACKGROUND_MODEL || 'birefnet.safetensors',
+      timeoutMs: Number(process.env.COMFYUI_TIMEOUT_MS || 180000),
+    },
   } as ModuleConfig;
 };

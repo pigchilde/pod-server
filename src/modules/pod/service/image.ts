@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as sharp from 'sharp';
 import { PodSettingService, PodModuleSettings } from './setting';
+import { PodComfyService } from './comfy';
 
 export interface PodGenerateImageInput {
   prompt: string;
@@ -19,6 +20,12 @@ export interface PodGenerateImageResult {
   imageUrl: string;
 }
 
+export interface PodCutoutImageInput {
+  fileName: string;
+  filePath: string;
+  imageUrl: string;
+}
+
 /**
  * POD图片生成适配器
  */
@@ -26,6 +33,9 @@ export interface PodGenerateImageResult {
 export class PodImageService {
   @Inject()
   podSettingService: PodSettingService;
+
+  @Inject()
+  podComfyService: PodComfyService;
 
   async generate(input: PodGenerateImageInput): Promise<PodGenerateImageResult> {
     // 每次生成都读取最新模块设置，保存后无需重启服务即可切换模型或接口参数。
@@ -35,6 +45,39 @@ export class PodImageService {
     }
 
     return this.generateMock(input);
+  }
+
+  async cutout(input: PodCutoutImageInput): Promise<PodGenerateImageResult> {
+    // 手动抠图入口：直接对已生成图片做 ComfyUI 背景移除，不再重新调用生图模型。
+    const settings = await this.podSettingService.getSettings();
+    if (!settings.cutout?.enabled) {
+      throw new Error('请先在模块设置中启用 ComfyUI 抠图');
+    }
+
+    const sourceBuffer = await fs.promises.readFile(input.filePath);
+    const ext = path.extname(input.fileName || input.filePath).replace('.', '') || 'png';
+    const cutoutBuffer = await this.podComfyService.removeBackground({
+      buffer: sourceBuffer,
+      fileName: input.fileName || path.basename(input.filePath),
+      settings,
+    });
+    const outputBuffer = await this.resizeToOutputSize(cutoutBuffer, ext, settings);
+    const parsedPath = path.parse(input.filePath);
+    const parsedUrl = path.posix.parse(input.imageUrl || '');
+    const fileName = `${parsedPath.name}.png`;
+    const filePath = path.join(parsedPath.dir, fileName);
+    const imageUrl = path.posix.join(parsedUrl.dir || '/', fileName);
+
+    await fs.promises.writeFile(filePath, outputBuffer);
+    if (filePath !== input.filePath && fs.existsSync(input.filePath)) {
+      await fs.promises.unlink(input.filePath);
+    }
+
+    return {
+      fileName,
+      filePath,
+      imageUrl,
+    };
   }
 
   private async generateFromRightCodes(
@@ -123,8 +166,9 @@ export class PodImageService {
   ) {
     // 所有来源最终统一保存到批次目录，并返回前端可访问的静态 URL。
     await fs.promises.mkdir(input.outputDir, { recursive: true });
-    const outputBuffer = await this.resizeToOutputSize(buffer, ext, settings);
-    const fileExt = settings?.generation?.outputSize ? 'png' : ext;
+    const cutoutBuffer = await this.removeBackground(buffer, input, ext, settings);
+    const outputBuffer = await this.resizeToOutputSize(cutoutBuffer, ext, settings);
+    const fileExt = settings?.generation?.outputSize || settings?.cutout?.enabled ? 'png' : ext;
     const fileName = `${input.fileBaseName}.${fileExt}`;
     const filePath = path.join(input.outputDir, fileName);
     await fs.promises.writeFile(filePath, outputBuffer);
@@ -138,6 +182,23 @@ export class PodImageService {
       filePath,
       imageUrl: path.posix.join(input.publicDir, fileName),
     };
+  }
+
+  private async removeBackground(
+    buffer: Buffer,
+    input: PodGenerateImageInput,
+    ext: string,
+    settings?: PodModuleSettings
+  ) {
+    if (!settings?.cutout?.enabled || ext === 'svg') {
+      return buffer;
+    }
+
+    return this.podComfyService.removeBackground({
+      buffer,
+      fileName: `${input.fileBaseName}.${ext || 'png'}`,
+      settings,
+    });
   }
 
   private async resizeToOutputSize(

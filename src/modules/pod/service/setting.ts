@@ -22,6 +22,12 @@ export interface PodModuleSettings {
     model: string;
     systemPrompt: string;
   };
+  cutout: {
+    enabled: boolean;
+    endpoint: string;
+    model: string;
+    timeoutMs: number;
+  };
   unifiedPrompt: string;
 }
 
@@ -44,6 +50,9 @@ export class PodSettingService {
 
   @Config('module.pod.prompt')
   promptConfig;
+
+  @Config('module.pod.cutout')
+  cutoutConfig;
 
   async getSettings(): Promise<PodModuleSettings> {
     // 数据库没有保存过设置时，回退到模块 config.ts 里的默认值，保证初始化即可使用。
@@ -112,6 +121,15 @@ export class PodSettingService {
           defaults.prompt.systemPrompt
         ),
       },
+      cutout: {
+        enabled:
+          typeof value?.cutout?.enabled === 'boolean'
+            ? value.cutout.enabled
+            : defaults.cutout.enabled,
+        endpoint: this.str(value?.cutout?.endpoint, defaults.cutout.endpoint),
+        model: this.str(value?.cutout?.model, defaults.cutout.model),
+        timeoutMs: this.num(value?.cutout?.timeoutMs, defaults.cutout.timeoutMs),
+      },
       unifiedPrompt: this.str(value?.unifiedPrompt, defaults.unifiedPrompt),
     };
   }
@@ -139,6 +157,12 @@ export class PodSettingService {
         apiKey: this.promptConfig?.apiKey || '',
         model: this.promptConfig?.model || 'deepseek-v4-pro',
         systemPrompt: this.promptConfig?.systemPrompt || DEFAULT_POD_SYSTEM_PROMPT,
+      },
+      cutout: {
+        enabled: this.cutoutConfig?.enabled ?? true,
+        endpoint: this.cutoutConfig?.endpoint || 'http://127.0.0.1:8000',
+        model: this.cutoutConfig?.model || 'birefnet.safetensors',
+        timeoutMs: Number(this.cutoutConfig?.timeoutMs || 180000),
       },
       unifiedPrompt: DEFAULT_POD_UNIFIED_PROMPT,
     };
