@@ -12,6 +12,7 @@ import { PodPromptService } from './prompt';
 import { PodImageService } from './image';
 import { PodDeepseekService } from './deepseek';
 import { PodSettingService } from './setting';
+import { PodMockupService } from './mockup';
 
 /**
  * POD批量生成
@@ -35,6 +36,9 @@ export class PodGenerationService extends BaseService {
 
   @Inject()
   podSettingService: PodSettingService;
+
+  @Inject()
+  podMockupService: PodMockupService;
 
   @Init()
   async init() {
@@ -260,9 +264,11 @@ export class PodGenerationService extends BaseService {
         filePath: item.filePath,
         imageUrl: item.imageUrl,
       });
+      const mockupResult = await this.generateMockupResult(batch, result);
 
       await this.itemEntity.update(id, {
         ...result,
+        ...mockupResult,
         status: 'success',
         durationMs: Date.now() - startedAt,
       });
@@ -280,6 +286,38 @@ export class PodGenerationService extends BaseService {
     }
 
     return this.finishBatch(batch.id);
+  }
+
+  async generateMockupItem(id: number) {
+    // 单独生成 T 恤效果图：只读取当前印花图，不重新生图，也不重新抠图。
+    const item = await this.itemEntity.findOneBy({ id });
+    if (!item) {
+      throw new CoolCommException('任务项不存在');
+    }
+    if (item.status === 'running') {
+      throw new CoolCommException('生成中的图片暂时不能生成效果图');
+    }
+    if (!item.filePath || !fs.existsSync(item.filePath)) {
+      throw new CoolCommException('当前图片文件不存在，请先生成图片');
+    }
+
+    const batch = await this.ensureBatch(item.batchId);
+    try {
+      const mockupResult = await this.generateMockupResult(batch, {
+        fileName: item.fileName,
+        filePath: item.filePath,
+        imageUrl: item.imageUrl,
+      });
+      await this.itemEntity.update(id, {
+        ...mockupResult,
+        error: null,
+      });
+      await this.writeArtifacts(batch.id);
+      return this.itemEntity.findOneBy({ id });
+    } catch (err) {
+      await this.itemEntity.update(id, { error: err.message });
+      throw err;
+    }
   }
 
   async items(query: any) {
@@ -427,9 +465,11 @@ export class PodGenerationService extends BaseService {
         publicDir,
         timeoutMs: batch.timeoutMs,
       });
+      const mockupResult = await this.generateMockupResult(batch, result);
 
       await this.itemEntity.update(id, {
         ...result,
+        ...mockupResult,
         status: 'success',
         durationMs: Date.now() - startedAt,
       });
@@ -499,6 +539,9 @@ export class PodGenerationService extends BaseService {
     await fs.promises.mkdir(path.join(batch.outputDir, 'images'), {
       recursive: true,
     });
+    await fs.promises.mkdir(path.join(batch.outputDir, 'tshirt-effects'), {
+      recursive: true,
+    });
     await fs.promises.writeFile(
       path.join(batch.outputDir, 'manifest.json'),
       JSON.stringify({ ...batch, items }, null, 2)
@@ -518,6 +561,8 @@ export class PodGenerationService extends BaseService {
       'seoTitle',
       'tags',
       'fileName',
+      'mockupImageUrl',
+      'mockupFileName',
       'prompt',
       'error',
       'createdAt',
@@ -531,6 +576,8 @@ export class PodGenerationService extends BaseService {
         item.seoTitle || '',
         item.tags || '',
         item.fileName || '',
+        item.mockupImageUrl || '',
+        item.mockupFileName || '',
         item.prompt,
         item.error || '',
         item.createTime || '',
@@ -557,6 +604,18 @@ export class PodGenerationService extends BaseService {
       }
     });
     await Promise.all(runners);
+  }
+
+  private async generateMockupResult(
+    batch: PodGenerationBatchEntity,
+    image: { fileName: string; filePath: string; imageUrl: string }
+  ) {
+    return this.podMockupService.generate({
+      printFileName: image.fileName,
+      printFilePath: image.filePath,
+      batchOutputDir: batch.outputDir,
+      batchPublicDir: `/generated/temu-tshirt/${moment(batch.createTime).format('YYYY-MM-DD')}/${batch.topicSlug}`,
+    });
   }
 
   private async ensureBatch(id: number) {

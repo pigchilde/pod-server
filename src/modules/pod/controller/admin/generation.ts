@@ -77,6 +77,14 @@ export class AdminPodGenerationController extends BaseController {
   }
 
   /**
+   * 对单个任务项生成 T 恤效果图
+   */
+  @Post('/generateMockupItem', { summary: '任务项生成效果图' })
+  async generateMockupItem(@Body('id') id: number) {
+    return this.ok(await this.podGenerationService.generateMockupItem(id));
+  }
+
+  /**
    * 更新提示词并重新置为待确认
    */
   @Post('/updatePrompt', { summary: '更新提示词' })
