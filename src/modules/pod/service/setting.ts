@@ -27,6 +27,10 @@ export interface PodModuleSettings {
     endpoint: string;
     model: string;
     timeoutMs: number;
+    blackThreshold: number;
+    processRes: number;
+    maskBlur: number;
+    subjectMaskOffset: number;
   };
   unifiedPrompt: string;
 }
@@ -127,8 +131,32 @@ export class PodSettingService {
             ? value.cutout.enabled
             : defaults.cutout.enabled,
         endpoint: this.str(value?.cutout?.endpoint, defaults.cutout.endpoint),
-        model: this.str(value?.cutout?.model, defaults.cutout.model),
+        model: this.normalizeCutoutModel(value?.cutout?.model, defaults.cutout.model),
         timeoutMs: this.num(value?.cutout?.timeoutMs, defaults.cutout.timeoutMs),
+        blackThreshold: this.numInRange(
+          value?.cutout?.blackThreshold,
+          defaults.cutout.blackThreshold,
+          0,
+          255
+        ),
+        processRes: this.numInRange(
+          value?.cutout?.processRes,
+          defaults.cutout.processRes,
+          256,
+          2048
+        ),
+        maskBlur: this.numInRange(
+          value?.cutout?.maskBlur,
+          defaults.cutout.maskBlur,
+          0,
+          64
+        ),
+        subjectMaskOffset: this.numInRange(
+          value?.cutout?.subjectMaskOffset,
+          defaults.cutout.subjectMaskOffset,
+          -64,
+          64
+        ),
       },
       unifiedPrompt: this.str(value?.unifiedPrompt, defaults.unifiedPrompt),
     };
@@ -161,8 +189,12 @@ export class PodSettingService {
       cutout: {
         enabled: this.cutoutConfig?.enabled ?? true,
         endpoint: this.cutoutConfig?.endpoint || 'http://127.0.0.1:8000',
-        model: this.cutoutConfig?.model || 'birefnet.safetensors',
+        model: this.normalizeCutoutModel(this.cutoutConfig?.model, 'RMBG-2.0'),
         timeoutMs: Number(this.cutoutConfig?.timeoutMs || 180000),
+        blackThreshold: Number(this.cutoutConfig?.blackThreshold || 34),
+        processRes: Number(this.cutoutConfig?.processRes || 1536),
+        maskBlur: Number(this.cutoutConfig?.maskBlur ?? 1),
+        subjectMaskOffset: Number(this.cutoutConfig?.subjectMaskOffset ?? -1),
       },
       unifiedPrompt: DEFAULT_POD_UNIFIED_PROMPT,
     };
@@ -176,6 +208,22 @@ export class PodSettingService {
   private num(value: any, fallback: number) {
     const num = Number(value);
     return Number.isFinite(num) && num > 0 ? num : fallback;
+  }
+
+  private numInRange(value: any, fallback: number, min: number, max: number) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) {
+      return fallback;
+    }
+    return Math.min(max, Math.max(min, Math.trunc(num)));
+  }
+
+  private normalizeCutoutModel(value: any, fallback: string) {
+    const model = this.str(value, fallback);
+    if (['RMBG-2.0', 'INSPYRENET', 'BEN', 'BEN2'].includes(model)) {
+      return model;
+    }
+    return 'RMBG-2.0';
   }
 
   private normalizeSize(value: any) {

@@ -29,8 +29,12 @@ export default () => {
     cutout: {
       enabled: true,
       endpoint: process.env.COMFYUI_ENDPOINT || 'http://127.0.0.1:8000',
-      model: process.env.COMFYUI_BACKGROUND_MODEL || 'birefnet.safetensors',
+      model: process.env.COMFYUI_RMBG_MODEL || 'RMBG-2.0',
       timeoutMs: Number(process.env.COMFYUI_TIMEOUT_MS || 180000),
+      blackThreshold: Number(process.env.COMFYUI_BLACK_THRESHOLD || 34),
+      processRes: Number(process.env.COMFYUI_PROCESS_RES || 1536),
+      maskBlur: Number(process.env.COMFYUI_MASK_BLUR || 1),
+      subjectMaskOffset: Number(process.env.COMFYUI_SUBJECT_MASK_OFFSET || -1),
     },
   } as ModuleConfig;
 };

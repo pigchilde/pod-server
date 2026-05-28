@@ -240,7 +240,7 @@ export class PodGenerationService extends BaseService {
     if (item.status === 'running') {
       throw new CoolCommException('生成中的图片暂时不能抠图');
     }
-    if (item.status !== 'success') {
+    if (item.status !== 'success' && !(item.status === 'failed' && item.imageUrl)) {
       throw new CoolCommException('请先生成图片后再抠图');
     }
     if (!item.filePath || !fs.existsSync(item.filePath)) {
@@ -267,8 +267,9 @@ export class PodGenerationService extends BaseService {
         durationMs: Date.now() - startedAt,
       });
     } catch (err) {
+      // 抠图失败不代表原图生成失败；保留已有图片和重试入口，只记录本次抠图错误。
       await this.itemEntity.update(id, {
-        status: 'failed',
+        status: item.imageUrl ? 'success' : 'failed',
         error: err.message,
         durationMs: Date.now() - startedAt,
       });
