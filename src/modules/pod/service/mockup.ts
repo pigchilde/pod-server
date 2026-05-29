@@ -76,7 +76,7 @@ export class PodMockupService {
     return {
       mockupFileName,
       mockupFilePath,
-      mockupImageUrl: path.posix.join(input.batchPublicDir, 'tshirt-effects', mockupFileName),
+      mockupImageUrl: `${path.posix.join(input.batchPublicDir, 'tshirt-effects', mockupFileName)}?v=${Date.now()}`,
     };
   }
 }
