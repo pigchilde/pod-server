@@ -264,12 +264,20 @@ export class PodGenerationService extends BaseService {
         filePath: item.filePath,
         imageUrl: item.imageUrl,
       });
-      const mockupResult = await this.generateMockupResult(batch, result);
+      const { postProcessError, ...imageResult } = result;
+      let mockupResult = {};
+      let error = postProcessError || null;
+      try {
+        mockupResult = await this.generateMockupResult(batch, imageResult);
+      } catch (err) {
+        error = `效果图生成失败：${err.message}`;
+      }
 
       await this.itemEntity.update(id, {
-        ...result,
+        ...imageResult,
         ...mockupResult,
         status: 'success',
+        error,
         durationMs: Date.now() - startedAt,
       });
     } catch (err) {
@@ -324,7 +332,7 @@ export class PodGenerationService extends BaseService {
     // 图片管理和批次详情都复用这个任务项分页接口；不要走批次表的通用分页渲染。
     const page = this.clamp(Number(query.page || 1), 1, 100000);
     const size = this.clamp(Number(query.size || 20), 1, 100);
-    const find = this.itemEntity.createQueryBuilder('a').orderBy('a.id', 'ASC');
+    const find = this.itemEntity.createQueryBuilder('a');
     if (query.batchId) {
       find.andWhere('a.batchId = :batchId', { batchId: Number(query.batchId) });
     }
@@ -341,6 +349,11 @@ export class PodGenerationService extends BaseService {
         '(a.prompt like :keyWord or a.seoFileName like :keyWord or a.seoTitle like :keyWord)',
         { keyWord: `%${query.keyWord}%` }
       );
+    }
+    if (query.order === 'latest' || !query.batchId) {
+      find.orderBy('a.createTime', 'DESC').addOrderBy('a.id', 'DESC');
+    } else {
+      find.orderBy('a.id', 'ASC');
     }
     const [list, total] = await find
       .skip((page - 1) * size)
@@ -465,12 +478,22 @@ export class PodGenerationService extends BaseService {
         publicDir,
         timeoutMs: batch.timeoutMs,
       });
-      const mockupResult = await this.generateMockupResult(batch, result);
+      const { postProcessError, ...imageResult } = result;
+      let mockupResult = {};
+      let error = postProcessError || null;
+      if (!postProcessError) {
+        try {
+          mockupResult = await this.generateMockupResult(batch, imageResult);
+        } catch (err) {
+          error = `效果图生成失败：${err.message}`;
+        }
+      }
 
       await this.itemEntity.update(id, {
-        ...result,
+        ...imageResult,
         ...mockupResult,
         status: 'success',
+        error,
         durationMs: Date.now() - startedAt,
       });
     } catch (err) {

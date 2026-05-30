@@ -18,6 +18,7 @@ export interface PodGenerateImageResult {
   fileName: string;
   filePath: string;
   imageUrl: string;
+  postProcessError?: string;
 }
 
 export interface PodCutoutImageInput {
@@ -164,13 +165,22 @@ export class PodImageService {
     ext: string,
     settings?: PodModuleSettings
   ) {
-    // 所有来源最终统一保存到批次目录，并返回前端可访问的静态 URL。
+    // 先把图片模型返回的结果落盘；抠图服务异常时，也不能丢掉已经生成好的原图。
     await fs.promises.mkdir(input.outputDir, { recursive: true });
-    const cutoutBuffer = await this.removeBackground(buffer, input, ext, settings);
-    const outputBuffer = await this.resizeToOutputSize(cutoutBuffer, ext, settings);
     const fileExt = settings?.generation?.outputSize || settings?.cutout?.enabled ? 'png' : ext;
     const fileName = `${input.fileBaseName}.${fileExt}`;
     const filePath = path.join(input.outputDir, fileName);
+    const fallbackBuffer = await this.resizeToOutputSize(buffer, ext, settings);
+    let outputBuffer = fallbackBuffer;
+    let postProcessError = '';
+
+    try {
+      const cutoutBuffer = await this.removeBackground(buffer, input, ext, settings);
+      outputBuffer = await this.resizeToOutputSize(cutoutBuffer, ext, settings);
+    } catch (err) {
+      postProcessError = `抠图失败：${err.message}`;
+    }
+
     await fs.promises.writeFile(filePath, outputBuffer);
     const stat = await fs.promises.stat(filePath);
     if (stat.size <= 1024) {
@@ -181,6 +191,7 @@ export class PodImageService {
       fileName,
       filePath,
       imageUrl: path.posix.join(input.publicDir, fileName),
+      postProcessError,
     };
   }
 
