@@ -41,6 +41,7 @@ export class PodMockupService {
 
     const maxPrintWidth = Math.round(templateWidth * 0.52);
     const maxPrintHeight = Math.round(templateHeight * 0.42);
+    // 印花图通常是 2048 方图，必须先等比压进胸前区域，否则会盖住衣领和袖口。
     const printBuffer = await sharp(input.printFilePath)
       .rotate()
       .resize(maxPrintWidth, maxPrintHeight, {
@@ -53,6 +54,7 @@ export class PodMockupService {
     const printWidth = printMeta.width || maxPrintWidth;
     const printHeight = printMeta.height || maxPrintHeight;
     const left = Math.max(0, Math.round((templateWidth - printWidth) / 2));
+    // T.png 当前是平铺黑色 T 恤，0.3 的纵向比例大致落在胸前印花区。
     const top = Math.max(
       0,
       Math.min(

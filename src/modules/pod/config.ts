@@ -27,6 +27,7 @@ export default () => {
       model: process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro',
     },
     cutout: {
+      // 抠图依赖本机 ComfyUI 服务；服务不可用时，生图结果仍会先落盘，后续可手动补抠图。
       enabled: true,
       endpoint: process.env.COMFYUI_ENDPOINT || 'http://127.0.0.1:8000',
       model: process.env.COMFYUI_RMBG_MODEL || 'RMBG-2.0',

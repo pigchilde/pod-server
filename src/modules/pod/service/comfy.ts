@@ -218,6 +218,7 @@ export class PodComfyService {
       '6': {
         class_type: 'AILab_ColorToMask',
         inputs: {
+          // 图片模型偶尔会输出黑底图，这里把黑色区域转成辅助遮罩再与 RMBG 主体遮罩合并。
           images: ['1', 0],
           invert: true,
           threshold: options.blackThreshold,

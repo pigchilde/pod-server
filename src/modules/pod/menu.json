@@ -89,7 +89,7 @@
         "router": "/pod/setting",
         "perms": null,
         "type": 1,
-        "icon": "icon-setting",
+        "icon": "icon-set",
         "orderNum": 2,
         "viewPath": "modules/pod/views/setting/index.vue",
         "keepAlive": true,

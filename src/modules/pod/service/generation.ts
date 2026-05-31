@@ -350,6 +350,7 @@ export class PodGenerationService extends BaseService {
         { keyWord: `%${query.keyWord}%` }
       );
     }
+    // 全局图片管理按创建时间倒序；批次详情保留任务创建顺序，方便按编号审核。
     if (query.order === 'latest' || !query.batchId) {
       find.orderBy('a.createTime', 'DESC').addOrderBy('a.id', 'DESC');
     } else {
@@ -483,6 +484,7 @@ export class PodGenerationService extends BaseService {
       let error = postProcessError || null;
       if (!postProcessError) {
         try {
+          // 只有抠图成功后才自动合成效果图，避免把带背景的原图贴到 T 恤模板上。
           mockupResult = await this.generateMockupResult(batch, imageResult);
         } catch (err) {
           error = `效果图生成失败：${err.message}`;

@@ -175,6 +175,7 @@ export class PodImageService {
     let postProcessError = '';
 
     try {
+      // 后处理成功时覆盖为透明 PNG；失败时保留模型原图，避免浪费一次生图结果。
       const cutoutBuffer = await this.removeBackground(buffer, input, ext, settings);
       outputBuffer = await this.resizeToOutputSize(cutoutBuffer, ext, settings);
     } catch (err) {
