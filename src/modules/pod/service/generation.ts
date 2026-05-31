@@ -510,10 +510,14 @@ export class PodGenerationService extends BaseService {
         return this.runItem(id, retries);
       }
 
+      const hasExistingImage = Boolean(item.imageUrl && item.filePath);
       await this.itemEntity.update(id, {
-        status: 'failed',
+        // 重生成失败时，如果原来已有图片，不把旧成果标成失败，避免列表出现“有图但失败”的误导状态。
+        status: hasExistingImage ? 'success' : 'failed',
         attempts,
-        error: err.message,
+        error: hasExistingImage
+          ? `重新生成失败，已保留原图片：${err.message}`
+          : err.message,
         durationMs: Date.now() - startedAt,
       });
     } finally {
