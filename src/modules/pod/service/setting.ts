@@ -17,9 +17,12 @@ export interface PodModuleSettings {
   };
   prompt: {
     provider: string;
+    protocol: string;
     endpoint: string;
     apiKey: string;
     model: string;
+    temperature: number;
+    maxTokens: number;
     systemPrompt: string;
   };
   cutout: {
@@ -117,9 +120,25 @@ export class PodSettingService {
       },
       prompt: {
         provider: this.str(value?.prompt?.provider, defaults.prompt.provider),
+        protocol: this.normalizePromptProtocol(
+          value?.prompt?.protocol,
+          defaults.prompt.protocol
+        ),
         endpoint: this.str(value?.prompt?.endpoint, defaults.prompt.endpoint),
         apiKey: this.str(value?.prompt?.apiKey, defaults.prompt.apiKey),
         model: this.str(value?.prompt?.model, defaults.prompt.model),
+        temperature: this.numFloatInRange(
+          value?.prompt?.temperature,
+          defaults.prompt.temperature,
+          0,
+          2
+        ),
+        maxTokens: this.numInRange(
+          value?.prompt?.maxTokens,
+          defaults.prompt.maxTokens,
+          1024,
+          64000
+        ),
         systemPrompt: this.str(
           value?.prompt?.systemPrompt,
           defaults.prompt.systemPrompt
@@ -179,11 +198,17 @@ export class PodSettingService {
       },
       prompt: {
         provider: this.promptConfig?.provider || 'deepseek',
+        protocol: this.normalizePromptProtocol(
+          this.promptConfig?.protocol,
+          'openai-chat'
+        ),
         endpoint:
           this.promptConfig?.endpoint ||
           'https://api.deepseek.com/chat/completions',
         apiKey: this.promptConfig?.apiKey || '',
         model: this.promptConfig?.model || 'deepseek-v4-pro',
+        temperature: Number(this.promptConfig?.temperature ?? 0.7),
+        maxTokens: Number(this.promptConfig?.maxTokens || 8192),
         systemPrompt: this.promptConfig?.systemPrompt || DEFAULT_POD_SYSTEM_PROMPT,
       },
       cutout: {
@@ -218,6 +243,14 @@ export class PodSettingService {
     return Math.min(max, Math.max(min, Math.trunc(num)));
   }
 
+  private numFloatInRange(value: any, fallback: number, min: number, max: number) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) {
+      return fallback;
+    }
+    return Math.min(max, Math.max(min, num));
+  }
+
   private normalizeCutoutModel(value: any, fallback: string) {
     const model = this.str(value, fallback);
     if (['RMBG-2.0', 'INSPYRENET', 'BEN', 'BEN2'].includes(model)) {
@@ -233,5 +266,13 @@ export class PodSettingService {
       return size;
     }
     return '2048x2048';
+  }
+
+  private normalizePromptProtocol(value: any, fallback: string) {
+    const protocol = this.str(value, fallback);
+    if (['openai-chat', 'anthropic-messages'].includes(protocol)) {
+      return protocol;
+    }
+    return 'openai-chat';
   }
 }

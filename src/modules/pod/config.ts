@@ -22,9 +22,12 @@ export default () => {
     },
     prompt: {
       provider: 'deepseek',
+      protocol: 'openai-chat',
       endpoint: 'https://api.deepseek.com/chat/completions',
       apiKey: process.env.DEEPSEEK_API_KEY || 'sk-27de6de884154b28a25db1aae05cbc3a',
       model: process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro',
+      temperature: Number(process.env.POD_PROMPT_TEMPERATURE || 0.7),
+      maxTokens: Number(process.env.POD_PROMPT_MAX_TOKENS || 8192),
     },
     cutout: {
       // 抠图依赖本机 ComfyUI 服务；服务不可用时，生图结果仍会先落盘，后续可手动补抠图。

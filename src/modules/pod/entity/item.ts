@@ -4,7 +4,7 @@ import { BaseEntity } from '../../base/entity/base';
 /**
  * POD生图任务项
  *
- * 每条记录对应一张最终图片：先保存 DeepSeek 生成的 Prompt，再在用户确认后调用图片模型。
+ * 每条记录对应一张最终图片：先保存提示词模型生成的 Prompt，再在用户确认后调用图片模型。
  */
 @Entity('pod_generation_item')
 export class PodGenerationItemEntity extends BaseEntity {

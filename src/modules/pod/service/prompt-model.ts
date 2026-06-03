@@ -1,8 +1,8 @@
 import { Inject, Provide } from '@midwayjs/core';
 import axios from 'axios';
-import { PodSettingService } from './setting';
+import { PodSettingService, PodModuleSettings } from './setting';
 
-export interface DeepseekPromptItem {
+export interface PromptModelItem {
   subTheme: string;
   prompt: string;
   seoFileName: string;
@@ -10,17 +10,42 @@ export interface DeepseekPromptItem {
   tags?: string[];
 }
 
+type PromptProtocol = 'openai-chat' | 'anthropic-messages';
+
 /**
- * DeepSeek 提示词生成
+ * 提示词模型生成服务
+ *
+ * 负责把批次主题交给外部大模型，拿回每张图的差异化提示词。
+ * 目前支持 OpenAI Chat Completions 和 Anthropic Messages 两种中转站协议。
  */
 @Provide()
-export class PodDeepseekService {
+export class PodPromptModelService {
   @Inject()
   podSettingService: PodSettingService;
 
-  async generate(topic: string, count: number): Promise<DeepseekPromptItem[]> {
-    // DeepSeek 只负责生成每张图的差异化 Prompt，公共 POD 约束在生图阶段统一追加。
+  async generate(topic: string, count: number): Promise<PromptModelItem[]> {
     const settings = await this.podSettingService.getSettings();
+    const promptConfig = settings.prompt;
+    const protocol = this.normalizeProtocol(promptConfig.protocol);
+
+    const content =
+      protocol === 'anthropic-messages'
+        ? await this.requestAnthropicMessages(settings, topic, count)
+        : await this.requestOpenaiChat(settings, topic, count);
+
+    return this.parseItems(content, count);
+  }
+
+  getPromptSource(settings: PodModuleSettings) {
+    // 来源只记录 provider，便于后台列表查看，也避免超过数据库字段长度。
+    return String(settings.prompt.provider || 'prompt-model').slice(0, 30);
+  }
+
+  private async requestOpenaiChat(
+    settings: PodModuleSettings,
+    topic: string,
+    count: number
+  ) {
     const promptConfig = settings.prompt;
     const res = await axios.post(
       promptConfig.endpoint || 'https://api.deepseek.com/chat/completions',
@@ -36,8 +61,7 @@ export class PodDeepseekService {
             content: this.buildUserPrompt(topic, count),
           },
         ],
-        thinking: { type: 'enabled' },
-        reasoning_effort: 'high',
+        temperature: promptConfig.temperature,
         stream: false,
       },
       {
@@ -51,14 +75,49 @@ export class PodDeepseekService {
 
     const content = res.data?.choices?.[0]?.message?.content;
     if (!content) {
-      throw new Error('DeepSeek did not return prompt content');
+      throw new Error('提示词模型未返回内容');
     }
+    return content;
+  }
 
-    return this.parseItems(content, count);
+  private async requestAnthropicMessages(
+    settings: PodModuleSettings,
+    topic: string,
+    count: number
+  ) {
+    const promptConfig = settings.prompt;
+    const res = await axios.post(
+      promptConfig.endpoint || 'https://api.avemujica.moe/v1/messages',
+      {
+        model: promptConfig.model || 'claude-opus-4-8',
+        max_tokens: promptConfig.maxTokens || 8192,
+        system: promptConfig.systemPrompt,
+        messages: [
+          {
+            role: 'user',
+            content: this.buildUserPrompt(topic, count),
+          },
+        ],
+      },
+      {
+        timeout: 120000,
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': promptConfig.apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+      }
+    );
+
+    const content = this.readAnthropicText(res.data?.content);
+    if (!content) {
+      throw new Error('Claude 提示词模型未返回内容');
+    }
+    return content;
   }
 
   private buildUserPrompt(topic: string, count: number) {
-    // 强制 DeepSeek 返回 JSON，避免后端需要解析自然语言说明。
+    // 这段是系统输出格式约束，不建议放到后台让业务配置，避免模型返回结构失控。
     return `Create ${count} different image generation prompts for this POD T-shirt direction: "${topic}".
 
 Return ONLY valid JSON, no markdown fences, no explanation.
@@ -90,12 +149,12 @@ Rules:
     try {
       parsed = JSON.parse(jsonText);
     } catch (err) {
-      throw new Error(`DeepSeek JSON parse failed: ${err.message}`);
+      throw new Error(`提示词模型 JSON 解析失败：${err.message}`);
     }
 
     const items = Array.isArray(parsed?.items) ? parsed.items : [];
     if (items.length !== count) {
-      throw new Error(`DeepSeek returned ${items.length} prompts, expected ${count}`);
+      throw new Error(`提示词模型返回 ${items.length} 条，期望 ${count} 条`);
     }
 
     return items.map((item, index) => ({
@@ -113,13 +172,13 @@ Rules:
     const start = trimmed.indexOf('{');
     const end = trimmed.lastIndexOf('}');
     if (start < 0 || end < 0 || end <= start) {
-      throw new Error('DeepSeek response does not contain a JSON object');
+      throw new Error('提示词模型响应中没有 JSON 对象');
     }
     return trimmed.slice(start, end + 1);
   }
 
   private slugify(value: string) {
-    // SEO 文件名只保留英文、数字和连字符，便于落盘和 URL 访问。
+    // SEO 文件名只用于去重和历史兼容，最终图片文件名仍按标题保存。
     return String(value || 'pod-tshirt-print')
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
@@ -128,5 +187,27 @@ Rules:
       .filter(Boolean)
       .slice(0, 10)
       .join('-');
+  }
+
+  private normalizeProtocol(value: string): PromptProtocol {
+    return value === 'anthropic-messages' ? 'anthropic-messages' : 'openai-chat';
+  }
+
+  private readAnthropicText(content: any) {
+    if (typeof content === 'string') {
+      return content;
+    }
+    if (!Array.isArray(content)) {
+      return '';
+    }
+    return content
+      .map(item => {
+        if (typeof item === 'string') {
+          return item;
+        }
+        return item?.type === 'text' || item?.text ? String(item.text || '') : '';
+      })
+      .filter(Boolean)
+      .join('\n');
   }
 }

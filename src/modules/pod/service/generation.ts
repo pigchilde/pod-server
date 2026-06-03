@@ -10,7 +10,7 @@ import { PodGenerationBatchEntity } from '../entity/batch';
 import { PodGenerationItemEntity } from '../entity/item';
 import { PodPromptService } from './prompt';
 import { PodImageService } from './image';
-import { PodDeepseekService } from './deepseek';
+import { PodPromptModelService } from './prompt-model';
 import { PodSettingService } from './setting';
 import { PodMockupService } from './mockup';
 
@@ -32,7 +32,7 @@ export class PodGenerationService extends BaseService {
   podImageService: PodImageService;
 
   @Inject()
-  podDeepseekService: PodDeepseekService;
+  podPromptModelService: PodPromptModelService;
 
   @Inject()
   podSettingService: PodSettingService;
@@ -80,7 +80,7 @@ export class PodGenerationService extends BaseService {
       settings.generation.outputDir
     );
 
-    // 先落批次，DeepSeek 失败时也能保留失败状态和错误信息。
+    // 先落批次，提示词模型失败时也能保留失败状态和错误信息。
     const batch = await this.batchEntity.save({
       batchNo,
       topic,
@@ -101,8 +101,9 @@ export class PodGenerationService extends BaseService {
     });
 
     try {
-      // 一次性让 DeepSeek 返回指定数量的差异化 Prompt，再拆成图片任务项。
-      const prompts = await this.podDeepseekService.generate(topic, count);
+      // 一次性让提示词模型返回指定数量的差异化 Prompt，再拆成图片任务项。
+      const prompts = await this.podPromptModelService.generate(topic, count);
+      const promptSource = this.podPromptModelService.getPromptSource(settings);
       const used = new Set<string>();
       await this.itemEntity.save(
         prompts.map((item, index) => {
@@ -111,7 +112,7 @@ export class PodGenerationService extends BaseService {
             itemNo: String(index + 1).padStart(3, '0'),
             batchId: batch.id,
             subTheme: item.subTheme,
-            promptSource: 'deepseek',
+            promptSource,
             promptStatus: 'draft',
             prompt: item.prompt,
             seoFileName,
