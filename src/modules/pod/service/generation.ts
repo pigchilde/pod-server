@@ -62,7 +62,7 @@ export class PodGenerationService extends BaseService {
     }
 
     const count = this.clamp(Number(params.count || 10), 1, 100);
-    const concurrency = this.clamp(Number(params.concurrency || 3), 1, 10);
+    const concurrency = this.clamp(Number(params.concurrency || count), 1, 100);
     const retries = this.clamp(Number(params.retries ?? 1), 0, 5);
     const autoRun = params.autoRun !== false;
     // 读取后台“模块设置”，让接口地址、模型、尺寸、输出目录等参数可以动态调整。
