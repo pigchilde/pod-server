@@ -55,7 +55,7 @@ export class PodGenerationService extends BaseService {
   }
 
   async createBatch(params: any) {
-    // 创建批次只负责生成并保存提示词，不立即生图；生图需要用户确认提示词后再触发。
+    // 创建批次先生成并保存提示词；可按前端开关决定是否自动审批并直接进入生图。
     const topic = String(params.topic || '').trim();
     if (!topic) {
       throw new CoolCommException('请输入生成主题');
@@ -64,6 +64,7 @@ export class PodGenerationService extends BaseService {
     const count = this.clamp(Number(params.count || 10), 1, 100);
     const concurrency = this.clamp(Number(params.concurrency || 3), 1, 10);
     const retries = this.clamp(Number(params.retries ?? 1), 0, 5);
+    const autoRun = params.autoRun !== false;
     // 读取后台“模块设置”，让接口地址、模型、尺寸、输出目录等参数可以动态调整。
     const settings = await this.podSettingService.getSettings();
     const timeoutMs = this.clamp(
@@ -113,7 +114,7 @@ export class PodGenerationService extends BaseService {
             batchId: batch.id,
             subTheme: item.subTheme,
             promptSource,
-            promptStatus: 'draft',
+            promptStatus: autoRun ? 'approved' : 'draft',
             prompt: item.prompt,
             seoFileName,
             seoTitle: item.seoTitle || '',
@@ -125,7 +126,15 @@ export class PodGenerationService extends BaseService {
       );
 
       await this.refreshBatchStats(batch.id);
-      // 提示词生成完成后进入待确认状态，等待用户审核后再生图。
+      if (autoRun) {
+        // 自动生图不阻塞创建接口：先返回批次，再由后台继续消化图片任务。
+        await this.batchEntity.update(batch.id, { status: 'image_generating' });
+        await this.writeArtifacts(batch.id);
+        this.runBatchInBackground(batch.id);
+        return this.infoWithItems(batch.id);
+      }
+
+      // 关闭自动生图时，保持原有人工审批流程。
       await this.batchEntity.update(batch.id, { status: 'prompt_ready' });
       await this.writeArtifacts(batch.id);
       return this.infoWithItems(batch.id);
@@ -159,6 +168,17 @@ export class PodGenerationService extends BaseService {
       this.runItem(item.id, batch.retries)
     );
     return this.finishBatch(id);
+  }
+
+  private runBatchInBackground(id: number) {
+    setImmediate(() => {
+      this.runBatch(id).catch(async err => {
+        await this.batchEntity.update(id, {
+          status: 'failed',
+          error: err.message,
+        });
+      });
+    });
   }
 
   async retryFailed(id: number) {
