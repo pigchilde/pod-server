@@ -345,6 +345,14 @@ export class PodGenerationService extends BaseService {
         promptStatus: query.promptStatus,
       });
     }
+    const createTimeStart = this.normalizeDateTime(query.createTimeStart);
+    const createTimeEnd = this.normalizeDateTime(query.createTimeEnd);
+    if (createTimeStart) {
+      find.andWhere('a.createTime >= :createTimeStart', { createTimeStart });
+    }
+    if (createTimeEnd) {
+      find.andWhere('a.createTime <= :createTimeEnd', { createTimeEnd });
+    }
     if (query.keyWord) {
       find.andWhere(
         '(a.prompt like :keyWord or a.seoFileName like :keyWord or a.seoTitle like :keyWord)',
@@ -703,6 +711,18 @@ export class PodGenerationService extends BaseService {
       ? outputDir
       : path.resolve(process.cwd(), outputDir);
     return path.join(root, date, topicSlug);
+  }
+
+  private normalizeDateTime(value: any) {
+    const text = String(value || '').trim();
+    if (!text) {
+      return '';
+    }
+    const time = moment(text);
+    if (!time.isValid()) {
+      return '';
+    }
+    return time.format('YYYY-MM-DD HH:mm:ss');
   }
 
   private clamp(value: number, min: number, max: number) {
