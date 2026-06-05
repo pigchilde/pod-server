@@ -233,6 +233,35 @@ export class PodGenerationService extends BaseService {
     };
   }
 
+  async exportBatches(params: any = {}) {
+    // 导出数据按批次创建时间筛选，主表返回批次，附表返回批次下的标题和 Prompt。
+    const find = this.batchEntity.createQueryBuilder('a');
+    const createTimeStart = this.normalizeDateTime(params.createTimeStart);
+    const createTimeEnd = this.normalizeDateTime(params.createTimeEnd);
+    if (createTimeStart) {
+      find.andWhere('a.createTime >= :createTimeStart', { createTimeStart });
+    }
+    if (createTimeEnd) {
+      find.andWhere('a.createTime <= :createTimeEnd', { createTimeEnd });
+    }
+    const batches = await find
+      .orderBy('a.createTime', 'DESC')
+      .addOrderBy('a.id', 'DESC')
+      .getMany();
+    const batchIds = batches.map(item => item.id);
+    const items = batchIds.length
+      ? await this.itemEntity.find({
+          where: { batchId: In(batchIds) },
+          order: { batchId: 'ASC', id: 'ASC' },
+        })
+      : [];
+
+    return {
+      batches,
+      items,
+    };
+  }
+
   async runBatch(id: number) {
     // 执行批次只处理“已确认 + 待生成”的任务项，不会重复生成已成功图片。
     const batch = await this.ensureBatch(id);

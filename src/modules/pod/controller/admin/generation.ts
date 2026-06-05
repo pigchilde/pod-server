@@ -45,6 +45,14 @@ export class AdminPodGenerationController extends BaseController {
   }
 
   /**
+   * 导出批次和提示词数据
+   */
+  @Post('/exportBatches', { summary: '导出批次数据' })
+  async exportBatches(@Body() body: any) {
+    return this.ok(await this.podGenerationService.exportBatches(body));
+  }
+
+  /**
    * 执行批次中所有已确认且待生成的任务项
    */
   @Post('/runBatch', { summary: '执行批次' })
