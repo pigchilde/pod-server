@@ -147,6 +147,92 @@ export class PodGenerationService extends BaseService {
     }
   }
 
+  async createBatches(params: any = {}) {
+    // Excel 导入入口：每一行代表一个独立批次，复用单批次创建和自动生图流程。
+    let rows = [];
+    if (Array.isArray(params.rows)) {
+      rows = params.rows;
+    } else if (Array.isArray(params.list)) {
+      rows = params.list;
+    }
+    if (!rows.length) {
+      throw new CoolCommException('请上传至少一条批次数据');
+    }
+
+    const results = [];
+    for (let index = 0; index < rows.length; index++) {
+      const row = rows[index] || {};
+      const topic = this.pickText(row, ['topic', '主题', '生成主题', '题目']);
+      const count = this.pickNumber(row, ['count', '数量', '张数', '生成数量']);
+      const concurrency = this.pickNumber(row, [
+        'concurrency',
+        '并发',
+        '并发数',
+      ]);
+      const retries = this.pickNumber(row, [
+        'retries',
+        '失败重试',
+        '重试',
+        '重试次数',
+      ]);
+      const rowNo = index + 2;
+
+      if (!topic) {
+        results.push({
+          rowNo,
+          status: 'failed',
+          error: '主题不能为空',
+        });
+        continue;
+      }
+      if (!count || count < 1) {
+        results.push({
+          rowNo,
+          topic,
+          status: 'failed',
+          error: '数量必须大于 0',
+        });
+        continue;
+      }
+
+      try {
+        const batch = await this.createBatch({
+          topic,
+          count,
+          concurrency: concurrency || params.concurrency,
+          retries: retries ?? params.retries,
+          timeoutMs: params.timeoutMs,
+          autoRun: params.autoRun !== false,
+        });
+        results.push({
+          rowNo,
+          topic,
+          count,
+          status: 'success',
+          batchId: batch.id,
+          batchNo: batch.batchNo,
+        });
+      } catch (err) {
+        results.push({
+          rowNo,
+          topic,
+          count,
+          status: 'failed',
+          error: err.message,
+        });
+      }
+    }
+
+    const success = results.filter(item => item.status === 'success').length;
+    const failed = results.length - success;
+    return {
+      total: results.length,
+      success,
+      failed,
+      results,
+    };
+  }
+
   async runBatch(id: number) {
     // 执行批次只处理“已确认 + 待生成”的任务项，不会重复生成已成功图片。
     const batch = await this.ensureBatch(id);
@@ -743,6 +829,31 @@ export class PodGenerationService extends BaseService {
       return '';
     }
     return time.format('YYYY-MM-DD HH:mm:ss');
+  }
+
+  private pickText(row: any, keys: string[]) {
+    for (const key of keys) {
+      const value = row[key];
+      if (value !== undefined && value !== null && String(value).trim()) {
+        return String(value).trim();
+      }
+    }
+    return '';
+  }
+
+  private pickNumber(row: any, keys: string[]) {
+    for (const key of keys) {
+      const value = row[key];
+      if (
+        value !== undefined &&
+        value !== null &&
+        String(value).trim() !== ''
+      ) {
+        const num = Number(value);
+        return Number.isNaN(num) ? undefined : num;
+      }
+    }
+    return undefined;
   }
 
   private clamp(value: number, min: number, max: number) {

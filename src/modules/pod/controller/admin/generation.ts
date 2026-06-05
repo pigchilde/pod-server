@@ -37,6 +37,14 @@ export class AdminPodGenerationController extends BaseController {
   }
 
   /**
+   * 根据表格行批量创建批次
+   */
+  @Post('/createBatches', { summary: '批量创建批次' })
+  async createBatches(@Body() body: any) {
+    return this.ok(await this.podGenerationService.createBatches(body));
+  }
+
+  /**
    * 执行批次中所有已确认且待生成的任务项
    */
   @Post('/runBatch', { summary: '执行批次' })
