@@ -598,27 +598,28 @@ export class PodGenerationService extends BaseService {
     try {
       const imageDir = path.join(batch.outputDir, 'images');
       const publicDir = `/generated/temu-tshirt/${moment(batch.createTime).format('YYYY-MM-DD')}/${batch.topicSlug}/images`;
+      const fileBaseName = this.getImageFileBaseName(item);
       // 最终发给图片模型的 Prompt = 单条差异化 Prompt + 模块统一提示词。
       const finalPrompt = this.podSettingService.appendUnifiedPrompt(
         item.prompt,
         settings
       );
+      const imageIndex = Number(item.itemNo || 0) || 0;
+      const imageTotal = batch.promptCount || batch.count || 0;
       console.info(
-        [
-          '[POD_IMAGE_PROMPT]',
-          `batchNo=${batch.batchNo}`,
-          `itemNo=${item.itemNo}`,
-          `model=${settings.generation.model}`,
-          `size=${settings.generation.size}`,
-          `outputSize=${settings.generation.outputSize}`,
-          'prompt:',
-          finalPrompt,
-          '[/POD_IMAGE_PROMPT]',
-        ].join('\n')
+        this.formatImageRequestLog(batch, item, {
+          imageIndex,
+          imageTotal,
+          attempts,
+          maxAttempts: retries + 1,
+          fileBaseName,
+          model: settings.generation.model,
+          endpoint: settings.generation.endpoint,
+        })
       );
       const result = await this.podImageService.generate({
         prompt: finalPrompt,
-        fileBaseName: this.getImageFileBaseName(item),
+        fileBaseName,
         outputDir: imageDir,
         publicDir,
         timeoutMs: batch.timeoutMs,
@@ -643,13 +644,27 @@ export class PodGenerationService extends BaseService {
         durationMs: Date.now() - startedAt,
       });
     } catch (err) {
+      const durationMs = Date.now() - startedAt;
+      const imageIndex = Number(item.itemNo || 0) || 0;
+      const imageTotal = batch.promptCount || batch.count || 0;
+      const willRetry = attempts <= retries;
+      console.error(
+        this.formatImageErrorLog(batch, item, err, {
+          imageIndex,
+          imageTotal,
+          attempts,
+          maxAttempts: retries + 1,
+          willRetry,
+          durationMs,
+        })
+      );
       // attempts 是本次已经尝试的次数；未超过重试上限时继续递归重跑当前任务。
       if (attempts <= retries) {
         await this.itemEntity.update(id, {
           status: 'pending',
           attempts,
           error: err.message,
-          durationMs: Date.now() - startedAt,
+          durationMs,
         });
         return this.runItem(id, retries);
       }
@@ -662,7 +677,7 @@ export class PodGenerationService extends BaseService {
         error: hasExistingImage
           ? `重新生成失败，已保留原图片：${err.message}`
           : err.message,
-        durationMs: Date.now() - startedAt,
+        durationMs,
       });
     } finally {
       await this.refreshBatchStats(batch.id);
@@ -825,6 +840,73 @@ export class PodGenerationService extends BaseService {
       .replace(/[. ]+$/g, '')
       .trim()
       .slice(0, 180);
+  }
+
+  private formatImageRequestLog(
+    batch: PodGenerationBatchEntity,
+    item: PodGenerationItemEntity,
+    data: {
+      imageIndex: number;
+      imageTotal: number;
+      attempts: number;
+      maxAttempts: number;
+      fileBaseName: string;
+      model: string;
+      endpoint: string;
+    }
+  ) {
+    return [
+      '[POD_IMG_REQ]',
+      `batch=${batch.id}/${batch.batchNo}`,
+      `img=${data.imageIndex}/${data.imageTotal}`,
+      `item=${item.id}/${item.itemNo}`,
+      `try=${data.attempts}/${data.maxAttempts}`,
+      `cc=${batch.concurrency}`,
+      `model=${data.model || '-'}`,
+      `host=${this.getUrlHost(data.endpoint)}`,
+      `file="${this.compactLogText(data.fileBaseName, 80)}"`,
+    ].join(' ');
+  }
+
+  private formatImageErrorLog(
+    batch: PodGenerationBatchEntity,
+    item: PodGenerationItemEntity,
+    err: any,
+    data: {
+      imageIndex: number;
+      imageTotal: number;
+      attempts: number;
+      maxAttempts: number;
+      willRetry: boolean;
+      durationMs: number;
+    }
+  ) {
+    return [
+      '[POD_IMG_ERR]',
+      `batch=${batch.id}/${batch.batchNo}`,
+      `img=${data.imageIndex}/${data.imageTotal}`,
+      `item=${item.id}/${item.itemNo}`,
+      `try=${data.attempts}/${data.maxAttempts}`,
+      `retry=${data.willRetry ? 'yes' : 'no'}`,
+      `cost=${data.durationMs}ms`,
+      `status=${err?.response?.status || '-'}`,
+      `code=${err?.code || '-'}`,
+      `host=${this.getUrlHost(err?.config?.url)}`,
+      `msg="${this.compactLogText(err?.message || '', 160)}"`,
+    ].join(' ');
+  }
+
+  private getUrlHost(value: string) {
+    try {
+      return value ? new URL(value).host : '-';
+    } catch {
+      return '-';
+    }
+  }
+
+  private compactLogText(value: string, maxLength: number) {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
   }
 
   private createBatchNo(topicSlug: string) {
