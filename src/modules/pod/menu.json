@@ -85,12 +85,73 @@
         ]
       },
       {
+        "name": "供应商配置",
+        "router": "/pod/provider",
+        "perms": null,
+        "type": 1,
+        "icon": "icon-set",
+        "orderNum": 2,
+        "viewPath": "modules/pod/views/provider/index.vue",
+        "keepAlive": true,
+        "isShow": true,
+        "childMenus": [
+          {
+            "name": "查询",
+            "router": null,
+            "perms": "pod:provider:page,pod:provider:list,pod:provider:info,pod:provider:options",
+            "type": 2,
+            "icon": null,
+            "orderNum": 1,
+            "viewPath": null,
+            "keepAlive": false,
+            "isShow": true,
+            "childMenus": []
+          },
+          {
+            "name": "新增",
+            "router": null,
+            "perms": "pod:provider:add",
+            "type": 2,
+            "icon": null,
+            "orderNum": 2,
+            "viewPath": null,
+            "keepAlive": false,
+            "isShow": true,
+            "childMenus": []
+          },
+          {
+            "name": "修改",
+            "router": null,
+            "perms": "pod:provider:update",
+            "type": 2,
+            "icon": null,
+            "orderNum": 3,
+            "viewPath": null,
+            "keepAlive": false,
+            "isShow": true,
+            "childMenus": []
+          },
+          {
+            "name": "删除",
+            "router": null,
+            "perms": "pod:provider:delete",
+            "type": 2,
+            "icon": null,
+            "orderNum": 4,
+            "viewPath": null,
+            "keepAlive": false,
+            "isShow": true,
+            "childMenus": []
+          }
+        ]
+      },
+      {
         "name": "模块设置",
         "router": "/pod/setting",
         "perms": null,
         "type": 1,
         "icon": "icon-set",
-        "orderNum": 2,
+        "orderNum": 3,
         "viewPath": "modules/pod/views/setting/index.vue",
         "keepAlive": true,
         "isShow": true,

@@ -61,12 +61,19 @@ export class PodGenerationService extends BaseService {
       throw new CoolCommException('请输入生成主题');
     }
 
-    const count = this.clamp(Number(params.count || 10), 1, 100);
-    const concurrency = this.clamp(Number(params.concurrency || count), 1, 100);
-    const retries = this.clamp(Number(params.retries ?? 1), 0, 5);
-    const autoRun = params.autoRun !== false;
     // 读取后台“模块设置”，让接口地址、模型、尺寸、输出目录等参数可以动态调整。
     const settings = await this.podSettingService.getSettings();
+    const count = this.clamp(Number(params.count || 10), 1, 100);
+    const providerConcurrency = Number(settings.generation.concurrency || 0);
+    const rawConcurrency =
+      params.concurrency === undefined ||
+      params.concurrency === null ||
+      params.concurrency === ''
+        ? providerConcurrency || count
+        : Number(params.concurrency);
+    const concurrency = this.clamp(Number(rawConcurrency || count), 1, 100);
+    const retries = this.clamp(Number(params.retries ?? 1), 0, 5);
+    const autoRun = params.autoRun !== false;
     const timeoutMs = this.clamp(
       Number(params.timeoutMs || settings.generation.timeoutMs || 180000),
       30000,
@@ -97,7 +104,9 @@ export class PodGenerationService extends BaseService {
       approvedPromptCount: 0,
       outputDir,
       options: {
+        providerId: settings.generation.providerId,
         provider: settings.generation.provider || 'mock',
+        providerName: settings.generation.providerName,
       },
     });
 

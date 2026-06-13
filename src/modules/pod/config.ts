@@ -13,9 +13,11 @@ export default () => {
     generation: {
       outputDir: '../generated/temu-tshirt',
       provider: 'rightcodes',
+      protocol: 'openai-images',
+      concurrency: Number(process.env.POD_IMAGE_CONCURRENCY || 3),
       timeoutMs: 180000,
       endpoint: 'https://www.right.codes/draw/v1/images/generations',
-      apiKey: process.env.RIGHT_CODES_API_KEY || 'sk-112e8b3dcadb45d79d795502b4dd31d0',
+      apiKey: process.env.RIGHT_CODES_API_KEY || '',
       model: process.env.RIGHT_CODES_IMAGE_MODEL || 'gpt-image-2',
       size: '1024x1024',
       outputSize: '2048x2048',
@@ -23,8 +25,9 @@ export default () => {
     prompt: {
       provider: 'deepseek',
       protocol: 'openai-chat',
+      timeoutMs: Number(process.env.POD_PROMPT_TIMEOUT_MS || 120000),
       endpoint: 'https://api.deepseek.com/chat/completions',
-      apiKey: process.env.DEEPSEEK_API_KEY || 'sk-27de6de884154b28a25db1aae05cbc3a',
+      apiKey: process.env.DEEPSEEK_API_KEY || '',
       model: process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro',
       temperature: Number(process.env.POD_PROMPT_TEMPERATURE || 0.7),
       maxTokens: Number(process.env.POD_PROMPT_MAX_TOKENS || 8192),

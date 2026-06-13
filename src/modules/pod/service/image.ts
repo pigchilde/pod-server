@@ -41,11 +41,14 @@ export class PodImageService {
   async generate(input: PodGenerateImageInput): Promise<PodGenerateImageResult> {
     // 每次生成都读取最新模块设置，保存后无需重启服务即可切换模型或接口参数。
     const settings = await this.podSettingService.getSettings();
-    if (settings.generation.provider === 'rightcodes') {
-      return this.generateFromRightCodes(input, settings);
+    if (settings.generation.protocol === 'mock') {
+      return this.generateMock(input);
+    }
+    if (settings.generation.protocol === 'openai-images') {
+      return this.generateFromOpenaiImages(input, settings);
     }
 
-    return this.generateMock(input);
+    throw new Error(`Unsupported POD image provider protocol: ${settings.generation.protocol}`);
   }
 
   async cutout(input: PodCutoutImageInput): Promise<PodGenerateImageResult> {
@@ -81,11 +84,11 @@ export class PodImageService {
     };
   }
 
-  private async generateFromRightCodes(
+  private async generateFromOpenaiImages(
     input: PodGenerateImageInput,
     settings: PodModuleSettings
   ) {
-    // right.codes 接口按 OpenAI images generations 兼容格式调用。
+    // OpenAI images generations 兼容格式调用。
     const generationConfig = settings.generation;
     const endpoint = generationConfig.endpoint;
     if (!endpoint) {

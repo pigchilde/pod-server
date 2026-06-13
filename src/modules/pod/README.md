@@ -8,6 +8,12 @@
 - `POST /admin/pod/generation/retryItem`: retry one item.
 - `GET /admin/pod/generation/detail`: get a batch with items.
 - `POST /admin/pod/generation/items`: page items by batch.
+- `/admin/pod/provider/*`: manage image and prompt provider configs.
+- `GET /admin/pod/provider/options`: get enabled provider options for module settings.
 
-The default image provider is `mock`, which writes SVG placeholder images. Configure
-`module.pod.generation.provider` and `endpoint` when a real image API is available.
+Provider credentials and endpoints live in `pod_provider_config`. Module
+settings select one image provider and one prompt provider, while shared
+generation parameters such as image size, output size, timeout, temperature,
+max tokens, and system prompt stay in module settings. A new batch uses the
+image provider's default concurrency when the request or import row does not
+specify `concurrency`.

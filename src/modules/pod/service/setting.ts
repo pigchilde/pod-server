@@ -1,13 +1,24 @@
-import { Config, Provide } from '@midwayjs/core';
+import { Config, Inject, Provide } from '@midwayjs/core';
 import { CoolCommException } from '@cool-midway/core';
 import { InjectEntityModel } from '@midwayjs/typeorm';
 import { Repository } from 'typeorm';
 import { PodModuleSettingEntity } from '../entity/setting';
+import { PodProviderConfigService } from './provider';
+import {
+  DEFAULT_POD_SYSTEM_PROMPT,
+  DEFAULT_POD_UNIFIED_PROMPT,
+} from './constants';
+
+export { DEFAULT_POD_SYSTEM_PROMPT, DEFAULT_POD_UNIFIED_PROMPT };
 
 export interface PodModuleSettings {
   generation: {
     outputDir: string;
+    providerId: number;
     provider: string;
+    providerName: string;
+    protocol: string;
+    concurrency: number;
     timeoutMs: number;
     endpoint: string;
     apiKey: string;
@@ -16,11 +27,14 @@ export interface PodModuleSettings {
     outputSize: string;
   };
   prompt: {
+    providerId: number;
     provider: string;
+    providerName: string;
     protocol: string;
     endpoint: string;
     apiKey: string;
     model: string;
+    timeoutMs: number;
     temperature: number;
     maxTokens: number;
     systemPrompt: string;
@@ -38,11 +52,24 @@ export interface PodModuleSettings {
   unifiedPrompt: string;
 }
 
-export const DEFAULT_POD_SYSTEM_PROMPT =
-  'You generate safe, original POD T-shirt print image prompts. Return strict JSON only. Avoid copyrighted characters, brands, celebrities, sports teams, trademarks, and marketplace policy risks.';
-
-export const DEFAULT_POD_UNIFIED_PROMPT =
-  'Square 1:1 composition, 2048x2048 output, centered T-shirt print artwork, transparent background, high contrast, clean silhouette, screen print friendly, POD ready, no mockup, no shirt, no model, no watermark, no brand logo.';
+interface PersistedPodSettings {
+  generation: {
+    outputDir: string;
+    providerId: number;
+    timeoutMs: number;
+    size: string;
+    outputSize: string;
+  };
+  prompt: {
+    providerId: number;
+    timeoutMs: number;
+    temperature: number;
+    maxTokens: number;
+    systemPrompt: string;
+  };
+  cutout: PodModuleSettings['cutout'];
+  unifiedPrompt: string;
+}
 
 /**
  * POD模块设置
@@ -51,6 +78,9 @@ export const DEFAULT_POD_UNIFIED_PROMPT =
 export class PodSettingService {
   @InjectEntityModel(PodModuleSettingEntity)
   settingEntity: Repository<PodModuleSettingEntity>;
+
+  @Inject()
+  podProviderConfigService: PodProviderConfigService;
 
   @Config('module.pod.generation')
   generationConfig;
@@ -62,22 +92,75 @@ export class PodSettingService {
   cutoutConfig;
 
   async getSettings(): Promise<PodModuleSettings> {
-    // 数据库没有保存过设置时，回退到模块 config.ts 里的默认值，保证初始化即可使用。
     const row = await this.settingEntity.findOneBy({ keyName: 'default' });
-    if (!row?.data) {
-      return this.defaultSettings();
+    const raw = await this.readSettingsData(row?.data);
+    const settings = await this.mergeSettings(raw);
+
+    // 旧版设置里没有 providerId 时，自动迁移成“选择供应商”的新结构。
+    if (row?.data && this.needsMigration(raw)) {
+      await this.settingEntity.update(row.id, {
+        data: JSON.stringify(this.toPersistedSettings(settings)),
+      });
     }
 
-    try {
-      return this.mergeSettings(JSON.parse(row.data));
-    } catch (err) {
-      throw new CoolCommException(`POD模块设置解析失败：${err.message}`);
-    }
+    return settings;
   }
 
   async saveSettings(params: any) {
-    // 只保留服务端认可的字段，避免前端额外参数直接写入运行配置。
-    const settings = this.mergeSettings(params);
+    const current = await this.getSettings();
+    const imageProviderId =
+      Number(params?.generation?.providerId) || current.generation.providerId;
+    const promptProviderId =
+      Number(params?.prompt?.providerId) || current.prompt.providerId;
+
+    await this.podProviderConfigService.requireEnabled(imageProviderId, 'image');
+    await this.podProviderConfigService.requireEnabled(promptProviderId, 'prompt');
+
+    const settings: PersistedPodSettings = {
+      generation: {
+        outputDir: this.str(
+          params?.generation?.outputDir,
+          current.generation.outputDir
+        ),
+        providerId: imageProviderId,
+        timeoutMs: this.numInRange(
+          params?.generation?.timeoutMs,
+          current.generation.timeoutMs,
+          30000,
+          600000
+        ),
+        size: this.normalizeSize(params?.generation?.size, current.generation.size),
+        outputSize: this.normalizeSize(
+          params?.generation?.outputSize,
+          current.generation.outputSize
+        ),
+      },
+      prompt: {
+        providerId: promptProviderId,
+        timeoutMs: this.numInRange(
+          params?.prompt?.timeoutMs,
+          current.prompt.timeoutMs,
+          30000,
+          600000
+        ),
+        temperature: this.numFloatInRange(
+          params?.prompt?.temperature,
+          current.prompt.temperature,
+          0,
+          2
+        ),
+        maxTokens: this.numInRange(
+          params?.prompt?.maxTokens,
+          current.prompt.maxTokens,
+          1024,
+          64000
+        ),
+        systemPrompt: this.str(params?.prompt?.systemPrompt, current.prompt.systemPrompt),
+      },
+      cutout: this.normalizeCutout(params?.cutout, current.cutout),
+      unifiedPrompt: this.str(params?.unifiedPrompt, current.unifiedPrompt),
+    };
+
     const row = await this.settingEntity.findOneBy({ keyName: 'default' });
     const data = JSON.stringify(settings);
 
@@ -90,11 +173,10 @@ export class PodSettingService {
       });
     }
 
-    return settings;
+    return this.getSettings();
   }
 
   appendUnifiedPrompt(prompt: string, settings: PodModuleSettings) {
-    // 生图前先放公共约束，再接每条图的差异化内容，提升模型对全局要求的遵循度。
     const unifiedPrompt = String(settings.unifiedPrompt || '').trim();
     if (!unifiedPrompt) {
       return prompt;
@@ -102,31 +184,74 @@ export class PodSettingService {
     return `${unifiedPrompt}\n\nImage-specific prompt:\n${prompt.trim()}`;
   }
 
-  private mergeSettings(value: any): PodModuleSettings {
-    // 合并默认值并做轻量格式清洗，防止空字符串把关键配置覆盖掉。
-    const defaults = this.defaultSettings();
+  private async readSettingsData(data?: string) {
+    if (!data) {
+      return this.defaultRawSettings();
+    }
+
+    try {
+      return JSON.parse(data);
+    } catch (err) {
+      throw new CoolCommException(`POD模块设置解析失败：${err.message}`);
+    }
+  }
+
+  private async mergeSettings(value: any): Promise<PodModuleSettings> {
+    const defaults = this.defaultRawSettings();
+    const imageProvider = await this.podProviderConfigService.resolveForSettings(
+      'image',
+      value?.generation?.providerId,
+      {
+        ...defaults.generation,
+        ...(value?.generation || {}),
+      }
+    );
+    const promptProvider = await this.podProviderConfigService.resolveForSettings(
+      'prompt',
+      value?.prompt?.providerId,
+      {
+        ...defaults.prompt,
+        ...(value?.prompt || {}),
+      }
+    );
+
     return {
       generation: {
         outputDir: this.str(value?.generation?.outputDir, defaults.generation.outputDir),
-        provider: this.str(value?.generation?.provider, defaults.generation.provider),
-        timeoutMs: this.num(value?.generation?.timeoutMs, defaults.generation.timeoutMs),
-        endpoint: this.str(value?.generation?.endpoint, defaults.generation.endpoint),
-        apiKey: this.str(value?.generation?.apiKey, defaults.generation.apiKey),
-        model: this.str(value?.generation?.model, defaults.generation.model),
-        size: this.normalizeSize(value?.generation?.size || defaults.generation.size),
+        providerId: imageProvider.id,
+        provider: imageProvider.code,
+        providerName: imageProvider.name,
+        protocol: imageProvider.protocol,
+        concurrency: imageProvider.concurrency,
+        timeoutMs: this.numInRange(
+          value?.generation?.timeoutMs,
+          defaults.generation.timeoutMs,
+          30000,
+          600000
+        ),
+        endpoint: imageProvider.endpoint,
+        apiKey: imageProvider.apiKey,
+        model: imageProvider.model,
+        size: this.normalizeSize(value?.generation?.size, defaults.generation.size),
         outputSize: this.normalizeSize(
-          value?.generation?.outputSize || defaults.generation.outputSize
+          value?.generation?.outputSize,
+          defaults.generation.outputSize
         ),
       },
       prompt: {
-        provider: this.str(value?.prompt?.provider, defaults.prompt.provider),
-        protocol: this.normalizePromptProtocol(
-          value?.prompt?.protocol,
-          defaults.prompt.protocol
+        providerId: promptProvider.id,
+        provider: promptProvider.code,
+        providerName: promptProvider.name,
+        protocol: promptProvider.protocol,
+        endpoint: promptProvider.endpoint,
+        apiKey: promptProvider.apiKey,
+        model: promptProvider.model,
+        timeoutMs: this.numInRange(
+          value?.prompt?.timeoutMs,
+          defaults.prompt.timeoutMs,
+          30000,
+          600000
         ),
-        endpoint: this.str(value?.prompt?.endpoint, defaults.prompt.endpoint),
-        apiKey: this.str(value?.prompt?.apiKey, defaults.prompt.apiKey),
-        model: this.str(value?.prompt?.model, defaults.prompt.model),
         temperature: this.numFloatInRange(
           value?.prompt?.temperature,
           defaults.prompt.temperature,
@@ -144,49 +269,52 @@ export class PodSettingService {
           defaults.prompt.systemPrompt
         ),
       },
-      cutout: {
-        enabled:
-          typeof value?.cutout?.enabled === 'boolean'
-            ? value.cutout.enabled
-            : defaults.cutout.enabled,
-        endpoint: this.str(value?.cutout?.endpoint, defaults.cutout.endpoint),
-        model: this.normalizeCutoutModel(value?.cutout?.model, defaults.cutout.model),
-        timeoutMs: this.num(value?.cutout?.timeoutMs, defaults.cutout.timeoutMs),
-        blackThreshold: this.numInRange(
-          value?.cutout?.blackThreshold,
-          defaults.cutout.blackThreshold,
-          0,
-          255
-        ),
-        processRes: this.numInRange(
-          value?.cutout?.processRes,
-          defaults.cutout.processRes,
-          256,
-          2048
-        ),
-        maskBlur: this.numInRange(
-          value?.cutout?.maskBlur,
-          defaults.cutout.maskBlur,
-          0,
-          64
-        ),
-        subjectMaskOffset: this.numInRange(
-          value?.cutout?.subjectMaskOffset,
-          defaults.cutout.subjectMaskOffset,
-          -64,
-          64
-        ),
-      },
+      cutout: this.normalizeCutout(value?.cutout, defaults.cutout),
       unifiedPrompt: this.str(value?.unifiedPrompt, defaults.unifiedPrompt),
     };
   }
 
-  private defaultSettings(): PodModuleSettings {
-    // 默认值仍来自代码配置，后台设置只是在运行期覆盖这些默认值。
+  private toPersistedSettings(settings: PodModuleSettings): PersistedPodSettings {
+    return {
+      generation: {
+        outputDir: settings.generation.outputDir,
+        providerId: settings.generation.providerId,
+        timeoutMs: settings.generation.timeoutMs,
+        size: settings.generation.size,
+        outputSize: settings.generation.outputSize,
+      },
+      prompt: {
+        providerId: settings.prompt.providerId,
+        timeoutMs: settings.prompt.timeoutMs,
+        temperature: settings.prompt.temperature,
+        maxTokens: settings.prompt.maxTokens,
+        systemPrompt: settings.prompt.systemPrompt,
+      },
+      cutout: settings.cutout,
+      unifiedPrompt: settings.unifiedPrompt,
+    };
+  }
+
+  private needsMigration(value: any) {
+    return (
+      !value?.generation?.providerId ||
+      !value?.prompt?.providerId ||
+      value?.generation?.endpoint ||
+      value?.generation?.apiKey ||
+      value?.generation?.model ||
+      value?.prompt?.endpoint ||
+      value?.prompt?.apiKey ||
+      value?.prompt?.model
+    );
+  }
+
+  private defaultRawSettings() {
     return {
       generation: {
         outputDir: this.generationConfig?.outputDir || '../generated/temu-tshirt',
         provider: this.generationConfig?.provider || 'rightcodes',
+        protocol: this.generationConfig?.protocol || 'openai-images',
+        concurrency: Number(this.generationConfig?.concurrency || 3),
         timeoutMs: Number(this.generationConfig?.timeoutMs || 180000),
         endpoint:
           this.generationConfig?.endpoint ||
@@ -198,10 +326,8 @@ export class PodSettingService {
       },
       prompt: {
         provider: this.promptConfig?.provider || 'deepseek',
-        protocol: this.normalizePromptProtocol(
-          this.promptConfig?.protocol,
-          'openai-chat'
-        ),
+        protocol: this.promptConfig?.protocol || 'openai-chat',
+        timeoutMs: Number(this.promptConfig?.timeoutMs || 120000),
         endpoint:
           this.promptConfig?.endpoint ||
           'https://api.deepseek.com/chat/completions',
@@ -222,6 +348,30 @@ export class PodSettingService {
         subjectMaskOffset: Number(this.cutoutConfig?.subjectMaskOffset ?? -1),
       },
       unifiedPrompt: DEFAULT_POD_UNIFIED_PROMPT,
+    };
+  }
+
+  private normalizeCutout(value: any, defaults: PodModuleSettings['cutout']) {
+    return {
+      enabled:
+        typeof value?.enabled === 'boolean' ? value.enabled : defaults.enabled,
+      endpoint: this.str(value?.endpoint, defaults.endpoint),
+      model: this.normalizeCutoutModel(value?.model, defaults.model),
+      timeoutMs: this.num(value?.timeoutMs, defaults.timeoutMs),
+      blackThreshold: this.numInRange(
+        value?.blackThreshold,
+        defaults.blackThreshold,
+        0,
+        255
+      ),
+      processRes: this.numInRange(value?.processRes, defaults.processRes, 256, 2048),
+      maskBlur: this.numInRange(value?.maskBlur, defaults.maskBlur, 0, 64),
+      subjectMaskOffset: this.numInRange(
+        value?.subjectMaskOffset,
+        defaults.subjectMaskOffset,
+        -64,
+        64
+      ),
     };
   }
 
@@ -251,28 +401,19 @@ export class PodSettingService {
     return Math.min(max, Math.max(min, num));
   }
 
+  private normalizeSize(value: any, fallback: string) {
+    const size = String(value || '').trim();
+    if (/^\d+x\d+$/.test(size)) {
+      return size;
+    }
+    return fallback;
+  }
+
   private normalizeCutoutModel(value: any, fallback: string) {
     const model = this.str(value, fallback);
     if (['RMBG-2.0', 'INSPYRENET', 'BEN', 'BEN2'].includes(model)) {
       return model;
     }
     return 'RMBG-2.0';
-  }
-
-  private normalizeSize(value: any) {
-    // 当前图片接口使用 2048x2048 这类字符串表达尺寸。
-    const size = String(value || '').trim();
-    if (/^\d+x\d+$/.test(size)) {
-      return size;
-    }
-    return '2048x2048';
-  }
-
-  private normalizePromptProtocol(value: any, fallback: string) {
-    const protocol = this.str(value, fallback);
-    if (['openai-chat', 'anthropic-messages'].includes(protocol)) {
-      return protocol;
-    }
-    return 'openai-chat';
   }
 }

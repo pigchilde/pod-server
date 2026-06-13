@@ -65,7 +65,7 @@ export class PodPromptModelService {
         stream: false,
       },
       {
-        timeout: 120000,
+        timeout: promptConfig.timeoutMs || 120000,
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${promptConfig.apiKey}`,
@@ -100,7 +100,7 @@ export class PodPromptModelService {
         ],
       },
       {
-        timeout: 120000,
+        timeout: promptConfig.timeoutMs || 120000,
         headers: {
           'Content-Type': 'application/json',
           'x-api-key': promptConfig.apiKey,
