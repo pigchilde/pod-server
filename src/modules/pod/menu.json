@@ -85,12 +85,37 @@
         ]
       },
       {
+        "name": "抠图模块",
+        "router": "/pod/cutout",
+        "perms": null,
+        "type": 1,
+        "icon": "icon-pic",
+        "orderNum": 2,
+        "viewPath": "modules/pod/views/cutout/index.vue",
+        "keepAlive": true,
+        "isShow": true,
+        "childMenus": [
+          {
+            "name": "上传抠图",
+            "router": null,
+            "perms": "pod:cutout:upload",
+            "type": 2,
+            "icon": null,
+            "orderNum": 1,
+            "viewPath": null,
+            "keepAlive": false,
+            "isShow": true,
+            "childMenus": []
+          }
+        ]
+      },
+      {
         "name": "供应商配置",
         "router": "/pod/provider",
         "perms": null,
         "type": 1,
         "icon": "icon-set",
-        "orderNum": 2,
+        "orderNum": 3,
         "viewPath": "modules/pod/views/provider/index.vue",
         "keepAlive": true,
         "isShow": true,
@@ -151,7 +176,7 @@
         "perms": null,
         "type": 1,
         "icon": "icon-set",
-        "orderNum": 3,
+        "orderNum": 4,
         "viewPath": "modules/pod/views/setting/index.vue",
         "keepAlive": true,
         "isShow": true,
