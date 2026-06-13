@@ -12,12 +12,15 @@ export interface PodGenerateImageInput {
   outputDir: string;
   publicDir: string;
   timeoutMs: number;
+  providerImageUrl?: string;
+  onProviderImageUrl?: (url: string) => Promise<void>;
 }
 
 export interface PodGenerateImageResult {
   fileName: string;
   filePath: string;
   imageUrl: string;
+  providerImageUrl?: string;
   postProcessError?: string;
 }
 
@@ -95,45 +98,53 @@ export class PodImageService {
       throw new Error('POD image provider endpoint is not configured');
     }
 
-    const res = await axios.post(
-      endpoint,
-      {
-        model: generationConfig.model || 'gpt-image-2',
-        prompt: input.prompt,
-        n: 1,
-        size: generationConfig.size || '1024x1024',
-      },
-      {
-        timeout: input.timeoutMs,
-        headers: generationConfig.apiKey
-          ? { Authorization: `Bearer ${generationConfig.apiKey}` }
-          : undefined,
+    let providerImageUrl = String(input.providerImageUrl || '').trim();
+    if (!providerImageUrl) {
+      const res = await axios.post(
+        endpoint,
+        {
+          model: generationConfig.model || 'gpt-image-2',
+          prompt: input.prompt,
+          n: 1,
+          size: generationConfig.size || '1024x1024',
+        },
+        {
+          timeout: input.timeoutMs,
+          headers: generationConfig.apiKey
+            ? { Authorization: `Bearer ${generationConfig.apiKey}` }
+            : undefined,
+        }
+      );
+
+      // 兼容不同中转实现：有的返回 data[0].b64_json，有的直接返回 url/base64。
+      const payload = res.data?.data?.[0] || res.data;
+      const b64Json = payload?.b64_json || payload?.base64 || payload?.imageBase64;
+      if (b64Json) {
+        return this.saveBase64(b64Json, input, settings);
       }
-    );
 
-    // 兼容不同中转实现：有的返回 data[0].b64_json，有的直接返回 url/base64。
-    const payload = res.data?.data?.[0] || res.data;
-    const b64Json = payload?.b64_json || payload?.base64 || payload?.imageBase64;
-    if (b64Json) {
-      return this.saveBase64(b64Json, input, settings);
+      providerImageUrl = payload?.url || payload?.imageUrl;
+      if (!providerImageUrl) {
+        throw new Error('POD image provider did not return url or b64_json');
+      }
+      await input.onProviderImageUrl?.(providerImageUrl);
     }
 
-    const imageUrl = payload?.url || payload?.imageUrl;
-    if (!imageUrl) {
-      throw new Error('POD image provider did not return url or b64_json');
-    }
-
-    const image = await axios.get(imageUrl, {
+    const image = await axios.get(providerImageUrl, {
       responseType: 'arraybuffer',
       timeout: input.timeoutMs,
     });
 
-    return this.saveBuffer(
+    const result = await this.saveBuffer(
       Buffer.from(image.data),
       input,
       this.extensionFromContentType(String(image.headers['content-type'] || '')),
       settings
     );
+    return {
+      ...result,
+      providerImageUrl,
+    };
   }
 
   private async saveBase64(

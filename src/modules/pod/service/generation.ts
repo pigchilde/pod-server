@@ -615,6 +615,7 @@ export class PodGenerationService extends BaseService {
       );
       const imageIndex = Number(item.itemNo || 0) || 0;
       const imageTotal = batch.promptCount || batch.count || 0;
+      const providerImageUrl = String(item.providerImageUrl || '').trim();
       console.info(
         this.formatImageRequestLog(batch, item, {
           imageIndex,
@@ -623,7 +624,8 @@ export class PodGenerationService extends BaseService {
           maxAttempts: retries + 1,
           fileBaseName,
           model: settings.generation.model,
-          endpoint: settings.generation.endpoint,
+          endpoint: providerImageUrl || settings.generation.endpoint,
+          mode: providerImageUrl ? 'download' : 'generate',
         })
       );
       const result = await this.podImageService.generate({
@@ -632,6 +634,10 @@ export class PodGenerationService extends BaseService {
         outputDir: imageDir,
         publicDir,
         timeoutMs: batch.timeoutMs,
+        providerImageUrl,
+        onProviderImageUrl: async url => {
+          await this.itemEntity.update(id, { providerImageUrl: url });
+        },
       });
       const { postProcessError, ...imageResult } = result;
       let mockupResult = {};
@@ -862,6 +868,7 @@ export class PodGenerationService extends BaseService {
       fileBaseName: string;
       model: string;
       endpoint: string;
+      mode: 'generate' | 'download';
     }
   ) {
     return [
@@ -871,6 +878,7 @@ export class PodGenerationService extends BaseService {
       `item=${item.id}/${item.itemNo}`,
       `try=${data.attempts}/${data.maxAttempts}`,
       `cc=${batch.concurrency}`,
+      `mode=${data.mode}`,
       `model=${data.model || '-'}`,
       `host=${this.getUrlHost(data.endpoint)}`,
       `file="${this.compactLogText(data.fileBaseName, 80)}"`,

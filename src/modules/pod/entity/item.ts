@@ -52,6 +52,9 @@ export class PodGenerationItemEntity extends BaseEntity {
   @Column({ comment: '图片访问地址', nullable: true, length: 500 })
   imageUrl: string;
 
+  @Column({ comment: '供应商原始图片地址', nullable: true, length: 1000 })
+  providerImageUrl: string;
+
   @Column({ comment: 'T恤效果图文件名', nullable: true, length: 220 })
   mockupFileName: string;
 
