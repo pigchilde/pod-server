@@ -333,6 +333,9 @@ export class PodGenerationService extends BaseService {
     if (item.promptStatus !== 'approved') {
       throw new CoolCommException('请先确认该提示词');
     }
+    if (item.status === 'running' || item.status === 'cutout_running') {
+      throw new CoolCommException('处理中的图片不能重复提交');
+    }
     const batch = await this.ensureBatch(item.batchId);
     await this.itemEntity.update(id, { status: 'pending', error: null });
     await this.runItem(id, batch.retries);
@@ -363,8 +366,8 @@ export class PodGenerationService extends BaseService {
     if (items.some(item => item.promptStatus !== 'approved')) {
       throw new CoolCommException('只能重新生成已确认提示词的图片');
     }
-    if (items.some(item => item.status === 'running')) {
-      throw new CoolCommException('生成中的图片不能重复提交');
+    if (items.some(item => item.status === 'running' || item.status === 'cutout_running')) {
+      throw new CoolCommException('处理中的图片不能重复提交');
     }
 
     const batchId = items[0].batchId;
@@ -386,8 +389,8 @@ export class PodGenerationService extends BaseService {
     if (!item) {
       throw new CoolCommException('任务项不存在');
     }
-    if (item.status === 'running') {
-      throw new CoolCommException('生成中的图片暂时不能抠图');
+    if (item.status === 'running' || item.status === 'cutout_running') {
+      throw new CoolCommException('处理中的图片暂时不能抠图');
     }
     if (item.status !== 'success' && !(item.status === 'failed' && item.imageUrl)) {
       throw new CoolCommException('请先生成图片后再抠图');
@@ -399,7 +402,7 @@ export class PodGenerationService extends BaseService {
     const batch = await this.ensureBatch(item.batchId);
     const startedAt = Date.now();
     await this.itemEntity.update(id, {
-      status: 'running',
+      status: 'cutout_running',
       error: null,
     });
 
@@ -447,8 +450,8 @@ export class PodGenerationService extends BaseService {
     if (!item) {
       throw new CoolCommException('任务项不存在');
     }
-    if (item.status === 'running') {
-      throw new CoolCommException('生成中的图片暂时不能生成效果图');
+    if (item.status === 'running' || item.status === 'cutout_running') {
+      throw new CoolCommException('处理中的图片暂时不能生成效果图');
     }
     if (!item.filePath || !fs.existsSync(item.filePath)) {
       throw new CoolCommException('当前图片文件不存在，请先生成图片');
@@ -529,8 +532,8 @@ export class PodGenerationService extends BaseService {
     if (!item) {
       throw new CoolCommException('任务项不存在');
     }
-    if (item.status === 'running') {
-      throw new CoolCommException('生成中的任务不能编辑');
+    if (item.status === 'running' || item.status === 'cutout_running') {
+      throw new CoolCommException('处理中的任务不能编辑');
     }
 
     await this.itemEntity.update(item.id, {
