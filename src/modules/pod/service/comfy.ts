@@ -90,9 +90,7 @@ export class PodComfyService {
       const history = res.data?.[promptId];
       const status = history?.status;
       if (status?.status_str === 'error') {
-        throw new Error(
-          `ComfyUI RMBG 黑底抠图失败：${JSON.stringify(status.messages || [])}`
-        );
+        throw new Error(this.formatComfyError(status.messages));
       }
 
       const outputImage = history?.outputs?.['3']?.images?.[0];
@@ -107,6 +105,24 @@ export class PodComfyService {
     }
 
     throw new Error('ComfyUI RMBG 黑底抠图超时');
+  }
+
+
+  private formatComfyError(messages: any[]) {
+    const executionError = Array.isArray(messages)
+      ? messages.find(item => Array.isArray(item) && item[0] === 'execution_error')?.[1]
+      : null;
+    const nodeType = executionError?.node_type || executionError?.node_id || 'unknown';
+    const message = executionError?.exception_message || JSON.stringify(messages || []);
+    return `ComfyUI RMBG 黑底抠图失败：${nodeType} ${this.compactText(message, 700)}`;
+  }
+
+  private compactText(value: any, maxLength: number) {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    if (text.length <= maxLength) {
+      return text;
+    }
+    return `${text.slice(0, maxLength)}...`;
   }
 
   private async downloadImage(

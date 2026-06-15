@@ -150,7 +150,7 @@ export class PodGenerationService extends BaseService {
     } catch (err) {
       await this.batchEntity.update(batch.id, {
         status: 'failed',
-        error: err.message,
+        error: this.formatDbError(err),
       });
       throw err;
     }
@@ -227,7 +227,7 @@ export class PodGenerationService extends BaseService {
           topic,
           count,
           status: 'failed',
-          error: err.message,
+          error: this.formatDbError(err),
         });
       }
     }
@@ -299,7 +299,7 @@ export class PodGenerationService extends BaseService {
       this.runBatch(id).catch(async err => {
         await this.batchEntity.update(id, {
           status: 'failed',
-          error: err.message,
+          error: this.formatDbError(err),
         });
       });
     });
@@ -418,7 +418,7 @@ export class PodGenerationService extends BaseService {
       try {
         mockupResult = await this.generateMockupResult(batch, imageResult);
       } catch (err) {
-        error = `效果图生成失败：${err.message}`;
+        error = this.formatDbError(err, '效果图生成失败：');
       }
 
       await this.itemEntity.update(id, {
@@ -432,7 +432,7 @@ export class PodGenerationService extends BaseService {
       // 抠图失败不代表原图生成失败；保留已有图片和重试入口，只记录本次抠图错误。
       await this.itemEntity.update(id, {
         status: item.imageUrl ? 'success' : 'failed',
-        error: err.message,
+        error: this.formatDbError(err),
         durationMs: Date.now() - startedAt,
       });
       throw err;
@@ -471,7 +471,7 @@ export class PodGenerationService extends BaseService {
       await this.writeArtifacts(batch.id);
       return this.itemEntity.findOneBy({ id });
     } catch (err) {
-      await this.itemEntity.update(id, { error: err.message });
+      await this.itemEntity.update(id, { error: this.formatDbError(err) });
       throw err;
     }
   }
@@ -650,7 +650,7 @@ export class PodGenerationService extends BaseService {
           // 只有抠图成功后才自动合成效果图，避免把带背景的原图贴到 T 恤模板上。
           mockupResult = await this.generateMockupResult(batch, imageResult);
         } catch (err) {
-          error = `效果图生成失败：${err.message}`;
+          error = this.formatDbError(err, '效果图生成失败：');
         }
       }
 
@@ -681,7 +681,7 @@ export class PodGenerationService extends BaseService {
         await this.itemEntity.update(id, {
           status: 'pending',
           attempts,
-          error: err.message,
+          error: this.formatDbError(err),
           durationMs,
         });
         return this.runItem(id, retries);
@@ -693,14 +693,23 @@ export class PodGenerationService extends BaseService {
         status: hasExistingImage ? 'success' : 'failed',
         attempts,
         error: hasExistingImage
-          ? `重新生成失败，已保留原图片：${err.message}`
-          : err.message,
+          ? this.formatDbError(err, '重新生成失败，已保留原图片：')
+          : this.formatDbError(err),
         durationMs,
       });
     } finally {
       await this.refreshBatchStats(batch.id);
       await this.writeArtifacts(batch.id);
     }
+  }
+
+
+  private formatDbError(err: any, prefix = '') {
+    const raw = err?.message || String(err || '未知错误');
+    const compact = String(raw).replace(/\s+/g, ' ').trim();
+    const text = `${prefix}${compact}`;
+    // pod_generation_item.error / pod_generation_batch.error 当前是 varchar(1000)，这里预留余量避免 MySQL 写入失败。
+    return text.length > 950 ? `${text.slice(0, 950)}...` : text;
   }
 
   private async finishBatch(id: number) {

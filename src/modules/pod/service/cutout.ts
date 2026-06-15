@@ -95,9 +95,16 @@ export class PodCutoutService {
       return {
         originalName,
         success: false,
-        error: err.message || String(err),
+        error: this.formatDbError(err),
       };
     }
+  }
+
+
+  private formatDbError(err: any) {
+    const raw = err?.message || String(err || '未知错误');
+    const compact = String(raw).replace(/\s+/g, ' ').trim();
+    return compact.length > 950 ? `${compact.slice(0, 950)}...` : compact;
   }
 
   private assertImageFile(fileName: string) {
