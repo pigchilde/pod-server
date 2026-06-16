@@ -41,7 +41,9 @@ export class PodImageService {
   @Inject()
   podComfyService: PodComfyService;
 
-  async generate(input: PodGenerateImageInput): Promise<PodGenerateImageResult> {
+  async generate(
+    input: PodGenerateImageInput
+  ): Promise<PodGenerateImageResult> {
     // 每次生成都读取最新模块设置，保存后无需重启服务即可切换模型或接口参数。
     const settings = await this.podSettingService.getSettings();
     if (settings.generation.protocol === 'mock') {
@@ -51,7 +53,9 @@ export class PodImageService {
       return this.generateFromOpenaiImages(input, settings);
     }
 
-    throw new Error(`Unsupported POD image provider protocol: ${settings.generation.protocol}`);
+    throw new Error(
+      `Unsupported POD image provider protocol: ${settings.generation.protocol}`
+    );
   }
 
   async cutout(input: PodCutoutImageInput): Promise<PodGenerateImageResult> {
@@ -62,22 +66,34 @@ export class PodImageService {
     }
 
     const sourceBuffer = await fs.promises.readFile(input.filePath);
-    const ext = path.extname(input.fileName || input.filePath).replace('.', '') || 'png';
+    const ext =
+      path.extname(input.fileName || input.filePath).replace('.', '') || 'png';
     const cutoutBuffer = await this.podComfyService.removeBackground({
       buffer: sourceBuffer,
       fileName: input.fileName || path.basename(input.filePath),
       settings,
     });
-    const outputBuffer = await this.resizeToOutputSize(cutoutBuffer, ext, settings);
+    const outputBuffer = await this.resizeToOutputSize(
+      cutoutBuffer,
+      ext,
+      settings
+    );
     const parsedPath = path.parse(input.filePath);
-    const parsedUrl = path.posix.parse(this.stripUrlQuery(input.imageUrl || ''));
+    const parsedUrl = path.posix.parse(
+      this.stripUrlQuery(input.imageUrl || '')
+    );
     const fileName = `${parsedPath.name}.png`;
     const filePath = path.join(parsedPath.dir, fileName);
-    const imageUrl = this.withCacheVersion(path.posix.join(parsedUrl.dir || '/', fileName));
+    const imageUrl = this.withCacheVersion(
+      path.posix.join(parsedUrl.dir || '/', fileName)
+    );
 
     await fs.promises.writeFile(filePath, outputBuffer);
     if (filePath !== input.filePath && fs.existsSync(input.filePath)) {
-      await fs.promises.unlink(input.filePath);
+      const backupPath = `${input.filePath}.orig`;
+      if (!fs.existsSync(backupPath)) {
+        await fs.promises.copyFile(input.filePath, backupPath);
+      }
     }
 
     return {
@@ -118,7 +134,8 @@ export class PodImageService {
 
       // 兼容不同中转实现：有的返回 data[0].b64_json，有的直接返回 url/base64。
       const payload = res.data?.data?.[0] || res.data;
-      const b64Json = payload?.b64_json || payload?.base64 || payload?.imageBase64;
+      const b64Json =
+        payload?.b64_json || payload?.base64 || payload?.imageBase64;
       if (b64Json) {
         return this.saveBase64(b64Json, input, settings);
       }
@@ -138,7 +155,9 @@ export class PodImageService {
     const result = await this.saveBuffer(
       Buffer.from(image.data),
       input,
-      this.extensionFromContentType(String(image.headers['content-type'] || '')),
+      this.extensionFromContentType(
+        String(image.headers['content-type'] || '')
+      ),
       settings
     );
     return {
@@ -166,8 +185,12 @@ export class PodImageService {
   <circle cx="800" cy="800" r="560" fill="#171717"/>
   <circle cx="800" cy="800" r="510" fill="#f7c66a"/>
   <text x="800" y="650" text-anchor="middle" font-family="Arial, sans-serif" font-size="96" font-weight="700" fill="#171717">POD MOCK</text>
-  <text x="800" y="790" text-anchor="middle" font-family="Arial, sans-serif" font-size="62" font-weight="700" fill="#171717">${this.escapeXml(input.fileBaseName)}</text>
-  <text x="800" y="930" text-anchor="middle" font-family="Arial, sans-serif" font-size="40" fill="#171717">${this.escapeXml(input.prompt.slice(0, 80))}</text>
+  <text x="800" y="790" text-anchor="middle" font-family="Arial, sans-serif" font-size="62" font-weight="700" fill="#171717">${this.escapeXml(
+    input.fileBaseName
+  )}</text>
+  <text x="800" y="930" text-anchor="middle" font-family="Arial, sans-serif" font-size="40" fill="#171717">${this.escapeXml(
+    input.prompt.slice(0, 80)
+  )}</text>
 </svg>`;
 
     return this.saveBuffer(Buffer.from(svg), input, 'svg');
@@ -181,7 +204,12 @@ export class PodImageService {
   ) {
     // 先把图片模型返回的结果落盘；抠图服务异常时，也不能丢掉已经生成好的原图。
     await fs.promises.mkdir(input.outputDir, { recursive: true });
-    const fileExt = settings?.generation?.outputSize || settings?.cutout?.enabled ? 'png' : ext;
+    const fileExt =
+      ext === 'svg'
+        ? 'svg'
+        : settings?.generation?.outputSize || settings?.cutout?.enabled
+        ? 'png'
+        : ext;
     const fileName = `${input.fileBaseName}.${fileExt}`;
     const filePath = path.join(input.outputDir, fileName);
     const fallbackBuffer = await this.resizeToOutputSize(buffer, ext, settings);
@@ -190,12 +218,18 @@ export class PodImageService {
 
     try {
       // 后处理成功时覆盖为透明 PNG；失败时保留模型原图，避免浪费一次生图结果。
-      const cutoutBuffer = await this.removeBackground(buffer, input, ext, settings);
+      const cutoutBuffer = await this.removeBackground(
+        buffer,
+        input,
+        ext,
+        settings
+      );
       outputBuffer = await this.resizeToOutputSize(cutoutBuffer, ext, settings);
     } catch (err) {
       postProcessError = `抠图失败：${err.message}`;
     }
 
+    await this.ensureValidImage(outputBuffer, fileExt);
     await fs.promises.writeFile(filePath, outputBuffer);
     const stat = await fs.promises.stat(filePath);
     if (stat.size <= 1024) {
@@ -205,7 +239,9 @@ export class PodImageService {
     return {
       fileName,
       filePath,
-      imageUrl: this.withCacheVersion(path.posix.join(input.publicDir, fileName)),
+      imageUrl: this.withCacheVersion(
+        path.posix.join(input.publicDir, fileName)
+      ),
       postProcessError,
     };
   }
@@ -260,6 +296,43 @@ export class PodImageService {
       })
       .png()
       .toBuffer();
+  }
+
+  private async ensureValidImage(buffer: Buffer, ext: string) {
+    const normalized = String(ext || '').toLowerCase();
+    if (normalized === 'svg') {
+      const head = buffer
+        .toString('utf8', 0, Math.min(buffer.length, 200))
+        .trim();
+      if (!head.includes('<svg')) {
+        throw new Error('Generated SVG image is invalid');
+      }
+      return;
+    }
+
+    const signature = buffer.subarray(0, 16);
+    const isPng =
+      signature.length >= 8 &&
+      signature
+        .subarray(0, 8)
+        .equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    const isJpeg =
+      signature.length >= 3 &&
+      signature[0] === 0xff &&
+      signature[1] === 0xd8 &&
+      signature[2] === 0xff;
+    const isWebp =
+      signature.length >= 12 &&
+      signature.toString('ascii', 0, 4) === 'RIFF' &&
+      signature.toString('ascii', 8, 12) === 'WEBP';
+    const isGif =
+      signature.length >= 6 &&
+      ['GIF87a', 'GIF89a'].includes(signature.toString('ascii', 0, 6));
+    if (!isPng && !isJpeg && !isWebp && !isGif) {
+      throw new Error('Generated image file signature is invalid');
+    }
+
+    await sharp(buffer).metadata();
   }
 
   private extensionFromContentType(contentType = '') {

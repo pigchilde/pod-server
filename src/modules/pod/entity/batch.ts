@@ -33,7 +33,8 @@ export class PodGenerationBatchEntity extends BaseEntity {
 
   @Index()
   @Column({
-    comment: '状态 prompt_generating/prompt_ready/image_generating/completed/partial_failed/failed',
+    comment:
+      '状态 prompt_generating/prompt_ready/image_generating/completed/partial_failed/failed',
     length: 30,
     default: 'pending',
   })

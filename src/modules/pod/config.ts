@@ -32,6 +32,12 @@ export default () => {
       temperature: Number(process.env.POD_PROMPT_TEMPERATURE || 0.7),
       maxTokens: Number(process.env.POD_PROMPT_MAX_TOKENS || 8192),
     },
+    mockup: {
+      templatePath: process.env.POD_MOCKUP_TEMPLATE_PATH || '',
+      maxPrintWidthRatio: Number(process.env.POD_MOCKUP_WIDTH_RATIO || 0.52),
+      maxPrintHeightRatio: Number(process.env.POD_MOCKUP_HEIGHT_RATIO || 0.42),
+      topRatio: Number(process.env.POD_MOCKUP_TOP_RATIO || 0.3),
+    },
     cutout: {
       // 抠图依赖本机 ComfyUI 服务；服务不可用时，生图结果仍会先落盘，后续可手动补抠图。
       enabled: true,

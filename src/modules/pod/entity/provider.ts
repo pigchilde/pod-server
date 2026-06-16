@@ -20,7 +20,10 @@ export class PodProviderConfigEntity extends BaseEntity {
   @Column({ comment: '是否启用', default: true })
   enabled: boolean;
 
-  @Column({ comment: '协议 openai-images/mock/openai-chat/anthropic-messages', length: 40 })
+  @Column({
+    comment: '协议 openai-images/mock/openai-chat/anthropic-messages',
+    length: 40,
+  })
   protocol: string;
 
   @Column({ comment: '接口地址', nullable: true, length: 500 })

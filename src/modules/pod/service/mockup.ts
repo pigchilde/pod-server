@@ -1,4 +1,4 @@
-import { Provide } from '@midwayjs/core';
+import { Config, Provide } from '@midwayjs/core';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as sharp from 'sharp';
@@ -21,9 +21,14 @@ export interface PodGenerateMockupResult {
  */
 @Provide()
 export class PodMockupService {
-  async generate(input: PodGenerateMockupInput): Promise<PodGenerateMockupResult> {
-    // T.png 放在 temu-tshirt 根目录，批次目录结构为 temu-tshirt/日期/主题。
-    const templatePath = path.join(input.batchOutputDir, '..', '..', 'T.png');
+  @Config('module.pod.mockup')
+  mockupConfig;
+
+  async generate(
+    input: PodGenerateMockupInput
+  ): Promise<PodGenerateMockupResult> {
+    // 默认从输出根目录读取 T.png，也支持通过 POD_MOCKUP_TEMPLATE_PATH 显式配置模板。
+    const templatePath = this.resolveTemplatePath(input.batchOutputDir);
     if (!fs.existsSync(templatePath)) {
       throw new Error(`T恤模板不存在：${templatePath}`);
     }
@@ -39,8 +44,13 @@ export class PodMockupService {
       throw new Error('T恤模板尺寸无效');
     }
 
-    const maxPrintWidth = Math.round(templateWidth * 0.52);
-    const maxPrintHeight = Math.round(templateHeight * 0.42);
+    const options = this.getLayoutOptions();
+    const maxPrintWidth = Math.round(
+      templateWidth * options.maxPrintWidthRatio
+    );
+    const maxPrintHeight = Math.round(
+      templateHeight * options.maxPrintHeightRatio
+    );
     // 印花图通常是 2048 方图，必须先等比压进胸前区域，否则会盖住衣领和袖口。
     const printBuffer = await sharp(input.printFilePath)
       .rotate()
@@ -58,14 +68,16 @@ export class PodMockupService {
     const top = Math.max(
       0,
       Math.min(
-        Math.round(templateHeight * 0.3),
+        Math.round(templateHeight * options.topRatio),
         templateHeight - printHeight
       )
     );
 
     const outputDir = path.join(input.batchOutputDir, 'tshirt-effects');
     await fs.promises.mkdir(outputDir, { recursive: true });
-    const baseName = path.parse(input.printFileName || input.printFilePath).name;
+    const baseName = path.parse(
+      input.printFileName || input.printFilePath
+    ).name;
     const mockupFileName = `${baseName}.jpg`;
     const mockupFilePath = path.join(outputDir, mockupFileName);
 
@@ -78,7 +90,40 @@ export class PodMockupService {
     return {
       mockupFileName,
       mockupFilePath,
-      mockupImageUrl: `${path.posix.join(input.batchPublicDir, 'tshirt-effects', mockupFileName)}?v=${Date.now()}`,
+      mockupImageUrl: `${path.posix.join(
+        input.batchPublicDir,
+        'tshirt-effects',
+        mockupFileName
+      )}?v=${Date.now()}`,
     };
+  }
+
+  private resolveTemplatePath(batchOutputDir: string) {
+    const configured = String(this.mockupConfig?.templatePath || '').trim();
+    if (configured) {
+      return path.isAbsolute(configured)
+        ? configured
+        : path.resolve(process.cwd(), configured);
+    }
+    return path.join(batchOutputDir, '..', '..', 'T.png');
+  }
+
+  private getLayoutOptions() {
+    return {
+      maxPrintWidthRatio: this.ratio(
+        this.mockupConfig?.maxPrintWidthRatio,
+        0.52
+      ),
+      maxPrintHeightRatio: this.ratio(
+        this.mockupConfig?.maxPrintHeightRatio,
+        0.42
+      ),
+      topRatio: this.ratio(this.mockupConfig?.topRatio, 0.3),
+    };
+  }
+
+  private ratio(value: any, fallback: number) {
+    const num = Number(value);
+    return Number.isFinite(num) && num > 0 && num <= 1 ? num : fallback;
   }
 }

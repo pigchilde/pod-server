@@ -40,6 +40,15 @@ export class PodGenerationService extends BaseService {
   @Inject()
   podMockupService: PodMockupService;
 
+  private activeImageTasks = 0;
+  private imageWaitQueue: Array<{
+    resolve: () => void;
+    reject: (err: Error) => void;
+    timer: NodeJS.Timeout;
+  }> = [];
+  private artifactTimers = new Map<number, NodeJS.Timeout>();
+  private runningBatchIds = new Set<number>();
+
   @Init()
   async init() {
     await super.init();
@@ -48,10 +57,19 @@ export class PodGenerationService extends BaseService {
   }
 
   async delete(ids: any) {
-    // 删除批次时同步清理图片任务项，避免产生游离记录。
-    const idArr = Array.isArray(ids) ? ids : String(ids).split(',');
-    await this.itemEntity.delete({ batchId: In(idArr.map(id => Number(id))) });
-    return super.delete(ids);
+    // 删除批次和图片任务项必须在同一事务内完成，避免中间失败留下半删除状态。
+    const idArr = (Array.isArray(ids) ? ids : String(ids).split(','))
+      .map(id => Number(id))
+      .filter(Boolean);
+    if (!idArr.length) {
+      return;
+    }
+
+    await this.batchEntity.manager.transaction(async manager => {
+      await manager.delete(PodGenerationItemEntity, { batchId: In(idArr) });
+      await manager.delete(PodGenerationBatchEntity, { id: In(idArr) });
+    });
+    return;
   }
 
   async createBatch(params: any) {
@@ -117,7 +135,11 @@ export class PodGenerationService extends BaseService {
       const used = new Set<string>();
       await this.itemEntity.save(
         prompts.map((item, index) => {
-          const seoFileName = this.uniqueSeoFileName(item.seoFileName, used, index);
+          const seoFileName = this.uniqueSeoFileName(
+            item.seoFileName,
+            used,
+            index
+          );
           return {
             itemNo: String(index + 1).padStart(3, '0'),
             batchId: batch.id,
@@ -273,29 +295,42 @@ export class PodGenerationService extends BaseService {
 
   async runBatch(id: number) {
     // 执行批次只处理“已确认 + 待生成”的任务项，不会重复生成已成功图片。
-    const batch = await this.ensureBatch(id);
-    const approvedCount = await this.itemEntity.countBy({
-      batchId: id,
-      promptStatus: 'approved',
-    });
-    if (!approvedCount) {
-      throw new CoolCommException('请先确认至少一条提示词');
+    if (!this.acquireBatchLock(id)) {
+      throw new CoolCommException('当前批次正在生成中，请勿重复执行');
     }
-    await this.batchEntity.update(id, { status: 'image_generating', error: null });
-    const items = await this.itemEntity.find({
-      where: { batchId: id, status: 'pending', promptStatus: 'approved' },
-      order: { id: 'ASC' },
-    });
 
-    // 按批次配置的并发数执行，避免一次性打爆图片生成接口。
-    await this.runPool(items, batch.concurrency, item =>
-      this.runItem(item.id, batch.retries)
-    );
-    return this.finishBatch(id);
+    try {
+      const batch = await this.ensureBatch(id);
+      const approvedCount = await this.itemEntity.countBy({
+        batchId: id,
+        promptStatus: 'approved',
+      });
+      if (!approvedCount) {
+        throw new CoolCommException('请先确认至少一条提示词');
+      }
+      await this.batchEntity.update(id, {
+        status: 'image_generating',
+        error: null,
+      });
+      const items = await this.itemEntity.find({
+        where: { batchId: id, status: 'pending', promptStatus: 'approved' },
+        order: { id: 'ASC' },
+      });
+
+      // 按批次配置的并发数执行；失败重试会回到队列尾部，避免长时间占住同一 worker。
+      await this.runItemsWithRetries(items, batch.concurrency, batch.retries);
+      return this.finishBatch(id);
+    } finally {
+      this.releaseBatchLock(id);
+    }
   }
 
   private runBatchInBackground(id: number) {
     setImmediate(() => {
+      if (this.runningBatchIds.has(id)) {
+        console.warn(`[POD_BATCH_SKIP] batch=${id} reason=already-running`);
+        return;
+      }
       this.runBatch(id).catch(async err => {
         await this.batchEntity.update(id, {
           status: 'failed',
@@ -307,21 +342,34 @@ export class PodGenerationService extends BaseService {
 
   async retryFailed(id: number) {
     // 重试失败只重置失败项，仍然要求提示词已确认。
-    const batch = await this.ensureBatch(id);
-    await this.itemEntity.update(
-      { batchId: id, status: 'failed', promptStatus: 'approved' },
-      { status: 'pending', error: null }
-    );
-    await this.batchEntity.update(id, { status: 'image_generating', error: null });
-    const items = await this.itemEntity.find({
-      where: { batchId: id, status: 'pending', promptStatus: 'approved' },
-      order: { id: 'ASC' },
-    });
+    if (!this.acquireBatchLock(id)) {
+      throw new CoolCommException('当前批次正在生成中，请勿重复执行');
+    }
 
-    await this.runPool(items, batch.concurrency, item =>
-      this.runItem(item.id, batch.retries)
-    );
-    return this.finishBatch(id);
+    try {
+      const batch = await this.ensureBatch(id);
+      if ((await this.countActiveItems(id)) > 0) {
+        throw new CoolCommException('当前批次正在生成中，请稍后再重试失败项');
+      }
+
+      await this.itemEntity.update(
+        { batchId: id, status: 'failed', promptStatus: 'approved' },
+        { status: 'pending', error: null }
+      );
+      await this.batchEntity.update(id, {
+        status: 'image_generating',
+        error: null,
+      });
+      const items = await this.itemEntity.find({
+        where: { batchId: id, status: 'pending', promptStatus: 'approved' },
+        order: { id: 'ASC' },
+      });
+
+      await this.runItemsWithRetries(items, batch.concurrency, batch.retries);
+      return this.finishBatch(id);
+    } finally {
+      this.releaseBatchLock(id);
+    }
   }
 
   async retryItem(id: number) {
@@ -337,9 +385,15 @@ export class PodGenerationService extends BaseService {
       throw new CoolCommException('处理中的图片不能重复提交');
     }
     const batch = await this.ensureBatch(item.batchId);
+    await this.ensureBatchNotProcessing(batch.id);
     await this.itemEntity.update(id, { status: 'pending', error: null });
-    await this.runItem(id, batch.retries);
-    return this.finishBatch(batch.id);
+    const pendingItem = await this.itemEntity.findOneBy({ id });
+    await this.runItemsWithRetries(
+      pendingItem ? [pendingItem] : [],
+      1,
+      batch.retries
+    );
+    return this.refreshBatchAfterSingleOperation(batch.id);
   }
 
   async retryItems(params: any) {
@@ -366,21 +420,27 @@ export class PodGenerationService extends BaseService {
     if (items.some(item => item.promptStatus !== 'approved')) {
       throw new CoolCommException('只能重新生成已确认提示词的图片');
     }
-    if (items.some(item => item.status === 'running' || item.status === 'cutout_running')) {
+    if (
+      items.some(
+        item => item.status === 'running' || item.status === 'cutout_running'
+      )
+    ) {
       throw new CoolCommException('处理中的图片不能重复提交');
     }
 
     const batchId = items[0].batchId;
     const batch = await this.ensureBatch(batchId);
-    await this.itemEntity.update({ id: In(ids) }, { status: 'pending', error: null });
+    await this.ensureBatchNotProcessing(batchId);
+    await this.itemEntity.update(
+      { id: In(ids) },
+      { status: 'pending', error: null }
+    );
     await this.batchEntity.update(batchId, {
       status: 'image_generating',
       error: null,
     });
-    await this.runPool(items, batch.concurrency, item =>
-      this.runItem(item.id, batch.retries)
-    );
-    return this.finishBatch(batchId);
+    await this.runItemsWithRetries(items, batch.concurrency, batch.retries);
+    return this.refreshBatchAfterSingleOperation(batchId);
   }
 
   async cutoutItem(id: number) {
@@ -392,7 +452,10 @@ export class PodGenerationService extends BaseService {
     if (item.status === 'running' || item.status === 'cutout_running') {
       throw new CoolCommException('处理中的图片暂时不能抠图');
     }
-    if (item.status !== 'success' && !(item.status === 'failed' && item.imageUrl)) {
+    if (
+      item.status !== 'success' &&
+      !(item.status === 'failed' && item.imageUrl)
+    ) {
       throw new CoolCommException('请先生成图片后再抠图');
     }
     if (!item.filePath || !fs.existsSync(item.filePath)) {
@@ -400,6 +463,7 @@ export class PodGenerationService extends BaseService {
     }
 
     const batch = await this.ensureBatch(item.batchId);
+    await this.ensureBatchNotProcessing(batch.id);
     const startedAt = Date.now();
     await this.itemEntity.update(id, {
       status: 'cutout_running',
@@ -441,7 +505,7 @@ export class PodGenerationService extends BaseService {
       await this.writeArtifacts(batch.id);
     }
 
-    return this.finishBatch(batch.id);
+    return this.refreshBatchAfterSingleOperation(batch.id);
   }
 
   async generateMockupItem(id: number) {
@@ -458,6 +522,7 @@ export class PodGenerationService extends BaseService {
     }
 
     const batch = await this.ensureBatch(item.batchId);
+    await this.ensureBatchNotProcessing(batch.id);
     try {
       const mockupResult = await this.generateMockupResult(batch, {
         fileName: item.fileName,
@@ -538,8 +603,12 @@ export class PodGenerationService extends BaseService {
 
     await this.itemEntity.update(item.id, {
       prompt: String(params.prompt || '').trim(),
-      seoFileName: this.podPromptService.slugify(params.seoFileName || item.seoFileName),
-      seoTitle: params.seoTitle ? String(params.seoTitle).slice(0, 180) : item.seoTitle,
+      seoFileName: this.podPromptService.slugify(
+        params.seoFileName || item.seoFileName
+      ),
+      seoTitle: params.seoTitle
+        ? String(params.seoTitle).slice(0, 180)
+        : item.seoTitle,
       tags: params.tags ? String(params.tags).slice(0, 500) : item.tags,
       promptStatus: 'draft',
     });
@@ -558,19 +627,6 @@ export class PodGenerationService extends BaseService {
     const item = await this.itemEntity.findOneBy({ id: ids[0] });
     await this.refreshBatchStats(item.batchId);
     await this.batchEntity.update(item.batchId, { status: 'prompt_ready' });
-    await this.writeArtifacts(item.batchId);
-    return this.infoWithItems(item.batchId);
-  }
-
-  async rejectPrompts(params: any) {
-    // 驳回只影响提示词状态，不删除记录，便于后续编辑或追溯。
-    const ids = Array.isArray(params.ids) ? params.ids.map(Number) : [];
-    if (!ids.length) {
-      throw new CoolCommException('请选择提示词');
-    }
-    await this.itemEntity.update({ id: In(ids) }, { promptStatus: 'rejected' });
-    const item = await this.itemEntity.findOneBy({ id: ids[0] });
-    await this.refreshBatchStats(item.batchId);
     await this.writeArtifacts(item.batchId);
     return this.infoWithItems(item.batchId);
   }
@@ -596,20 +652,32 @@ export class PodGenerationService extends BaseService {
     if (item.promptStatus !== 'approved') {
       return;
     }
+    if (item.status !== 'pending') {
+      return;
+    }
     const batch = await this.ensureBatch(item.batchId);
     const settings = await this.podSettingService.getSettings();
     const startedAt = Date.now();
     const attempts = item.attempts + 1;
 
-    await this.itemEntity.update(id, {
-      status: 'running',
-      attempts,
-      error: null,
-    });
+    const claim = await this.itemEntity.update(
+      { id, status: 'pending', promptStatus: 'approved' },
+      {
+        status: 'running',
+        attempts,
+        error: null,
+      }
+    );
+    if (!claim.affected) {
+      return;
+    }
 
     try {
       const imageDir = path.join(batch.outputDir, 'images');
-      const publicDir = `/generated/temu-tshirt/${moment(batch.createTime).format('YYYY-MM-DD')}/${batch.topicSlug}/images`;
+      const publicDir = path.posix.join(
+        this.getBatchPublicDir(batch),
+        'images'
+      );
       const fileBaseName = this.getImageFileBaseName(item);
       // 最终发给图片模型的 Prompt = 单条差异化 Prompt + 模块统一提示词。
       const finalPrompt = this.podSettingService.appendUnifiedPrompt(
@@ -631,17 +699,21 @@ export class PodGenerationService extends BaseService {
           mode: providerImageUrl ? 'download' : 'generate',
         })
       );
-      const result = await this.podImageService.generate({
-        prompt: finalPrompt,
-        fileBaseName,
-        outputDir: imageDir,
-        publicDir,
-        timeoutMs: batch.timeoutMs,
-        providerImageUrl,
-        onProviderImageUrl: async url => {
-          await this.itemEntity.update(id, { providerImageUrl: url });
-        },
-      });
+      const result = await this.withGlobalImageSlot(
+        settings.generation.concurrency,
+        () =>
+          this.podImageService.generate({
+            prompt: finalPrompt,
+            fileBaseName,
+            outputDir: imageDir,
+            publicDir,
+            timeoutMs: batch.timeoutMs,
+            providerImageUrl,
+            onProviderImageUrl: async url => {
+              await this.itemEntity.update(id, { providerImageUrl: url });
+            },
+          })
+      );
       const { postProcessError, ...imageResult } = result;
       let mockupResult = {};
       let error = postProcessError || null;
@@ -684,7 +756,7 @@ export class PodGenerationService extends BaseService {
           error: this.formatDbError(err),
           durationMs,
         });
-        return this.runItem(id, retries);
+        return;
       }
 
       const hasExistingImage = Boolean(item.imageUrl && item.filePath);
@@ -699,10 +771,9 @@ export class PodGenerationService extends BaseService {
       });
     } finally {
       await this.refreshBatchStats(batch.id);
-      await this.writeArtifacts(batch.id);
+      this.scheduleArtifactWrite(batch.id);
     }
   }
-
 
   private formatDbError(err: any, prefix = '') {
     const raw = err?.message || String(err || '未知错误');
@@ -713,14 +784,15 @@ export class PodGenerationService extends BaseService {
   }
 
   private async finishBatch(id: number) {
-    // 根据任务项最终统计回写批次状态，供列表页直接展示进度。
+    // 根据任务项最终统计回写批次状态；仍有运行/待生成任务时不能提前写终态。
     const stats = await this.refreshBatchStats(id);
-    const status =
-      stats.failedCount === 0
-        ? 'completed'
-        : stats.successCount > 0
-          ? 'partial_failed'
-          : 'failed';
+    const pendingCount = await this.itemEntity.countBy({
+      batchId: id,
+      status: 'pending',
+      promptStatus: 'approved',
+    });
+    const activeCount = await this.countActiveItems(id);
+    const status = this.resolveBatchStatus(stats, pendingCount, activeCount);
     await this.batchEntity.update(id, { status });
     await this.writeArtifacts(id);
     return this.infoWithItems(id);
@@ -730,11 +802,11 @@ export class PodGenerationService extends BaseService {
     // 批次统计全部由任务项实时汇总，避免前端根据列表自行推算。
     const [successCount, failedCount, promptCount, approvedPromptCount] =
       await Promise.all([
-      this.itemEntity.countBy({ batchId: id, status: 'success' }),
-      this.itemEntity.countBy({ batchId: id, status: 'failed' }),
-      this.itemEntity.countBy({ batchId: id }),
-      this.itemEntity.countBy({ batchId: id, promptStatus: 'approved' }),
-    ]);
+        this.itemEntity.countBy({ batchId: id, status: 'success' }),
+        this.itemEntity.countBy({ batchId: id, status: 'failed' }),
+        this.itemEntity.countBy({ batchId: id }),
+        this.itemEntity.countBy({ batchId: id, promptStatus: 'approved' }),
+      ]);
     await this.batchEntity.update(id, {
       successCount,
       failedCount,
@@ -745,6 +817,7 @@ export class PodGenerationService extends BaseService {
   }
 
   private async writeArtifacts(batchId: number) {
+    this.clearArtifactTimer(batchId);
     // 每次关键状态变化都写出 manifest 和 prompts.csv，方便离线查看和交付。
     const batch = await this.ensureBatch(batchId);
     const items = await this.itemEntity.find({
@@ -797,10 +870,210 @@ export class PodGenerationService extends BaseService {
         item.error || '',
         item.createTime || '',
       ]
-        .map(value => `"${String(value).replace(/"/g, '""')}"`)
+        .map(value => this.csvCell(value))
         .join(',')
     );
     return [header.join(','), ...rows].join('\n');
+  }
+
+  private async refreshBatchAfterSingleOperation(id: number) {
+    const stats = await this.refreshBatchStats(id);
+    const pendingCount = await this.itemEntity.countBy({
+      batchId: id,
+      status: 'pending',
+      promptStatus: 'approved',
+    });
+    const activeCount = await this.countActiveItems(id);
+    const status = this.resolveBatchStatus(stats, pendingCount, activeCount);
+    await this.batchEntity.update(id, { status });
+    await this.writeArtifacts(id);
+    return this.infoWithItems(id);
+  }
+
+  private resolveBatchStatus(
+    stats: {
+      successCount: number;
+      failedCount: number;
+      promptCount: number;
+      approvedPromptCount: number;
+    },
+    pendingCount: number,
+    activeCount: number
+  ) {
+    if (activeCount > 0) {
+      return 'image_generating';
+    }
+    if (pendingCount > 0) {
+      return 'prompt_ready';
+    }
+    if (!stats.approvedPromptCount) {
+      return 'prompt_ready';
+    }
+    return stats.failedCount === 0
+      ? 'completed'
+      : stats.successCount > 0
+      ? 'partial_failed'
+      : 'failed';
+  }
+
+  private async countActiveItems(batchId: number) {
+    return this.itemEntity.count({
+      where: {
+        batchId,
+        status: In(['running', 'cutout_running']),
+      },
+    });
+  }
+
+  private async ensureBatchNotProcessing(batchId: number) {
+    if (
+      this.runningBatchIds.has(batchId) ||
+      (await this.countActiveItems(batchId)) > 0
+    ) {
+      throw new CoolCommException('当前批次正在生成中，请稍后再操作单张图片');
+    }
+  }
+
+  private acquireBatchLock(id: number) {
+    if (this.runningBatchIds.has(id)) {
+      return false;
+    }
+    this.runningBatchIds.add(id);
+    return true;
+  }
+
+  private releaseBatchLock(id: number) {
+    this.runningBatchIds.delete(id);
+  }
+
+  private async runItemsWithRetries(
+    items: PodGenerationItemEntity[],
+    concurrency: number,
+    retries: number
+  ) {
+    let queue = items;
+    while (queue.length) {
+      await this.runPool(queue, concurrency, item =>
+        this.runItem(item.id, retries)
+      );
+      const retryIds = queue.map(item => item.id).filter(Boolean);
+      queue = retryIds.length
+        ? await this.itemEntity.find({
+            where: {
+              id: In(retryIds),
+              status: 'pending',
+              promptStatus: 'approved',
+            },
+            order: { id: 'ASC' },
+          })
+        : [];
+    }
+  }
+
+  private async withGlobalImageSlot<T>(
+    limit: number,
+    worker: () => Promise<T>
+  ) {
+    const max = this.clamp(Number(limit || 1), 1, 100);
+    const maxQueue = max * 100;
+    while (this.activeImageTasks >= max) {
+      if (this.imageWaitQueue.length >= maxQueue) {
+        throw new CoolCommException('图片生成队列已满，请稍后再试');
+      }
+      await this.waitForImageSlot(max);
+    }
+
+    this.activeImageTasks += 1;
+    try {
+      return await worker();
+    } finally {
+      this.activeImageTasks = Math.max(0, this.activeImageTasks - 1);
+      this.wakeNextImageWaiter();
+    }
+  }
+
+  private waitForImageSlot(limit: number) {
+    const timeoutMs = 10 * 60 * 1000;
+    return new Promise<void>((resolve, reject) => {
+      const waiter = {
+        resolve: () => {
+          clearTimeout(waiter.timer);
+          resolve();
+        },
+        reject: (err: Error) => {
+          clearTimeout(waiter.timer);
+          reject(err);
+        },
+        timer: setTimeout(() => {
+          const index = this.imageWaitQueue.indexOf(waiter);
+          if (index >= 0) {
+            this.imageWaitQueue.splice(index, 1);
+          }
+          reject(new Error(`图片生成队列等待超时，当前全局并发上限 ${limit}`));
+        }, timeoutMs),
+      };
+      this.imageWaitQueue.push(waiter);
+    });
+  }
+
+  private wakeNextImageWaiter() {
+    const next = this.imageWaitQueue.shift();
+    next?.resolve();
+  }
+
+  private scheduleArtifactWrite(batchId: number) {
+    this.clearArtifactTimer(batchId);
+    const timer = setTimeout(() => {
+      this.artifactTimers.delete(batchId);
+      this.writeArtifacts(batchId).catch(err => {
+        console.warn(
+          `[POD_ARTIFACT_WRITE_FAIL] batch=${batchId} msg="${this.compactLogText(
+            err?.message || err,
+            160
+          )}"`
+        );
+      });
+    }, 1500);
+    this.artifactTimers.set(batchId, timer);
+  }
+
+  private clearArtifactTimer(batchId: number) {
+    const timer = this.artifactTimers.get(batchId);
+    if (timer) {
+      clearTimeout(timer);
+      this.artifactTimers.delete(batchId);
+    }
+  }
+
+  private csvCell(value: any) {
+    let text = String(value ?? '');
+    if (/^[=+\-@]/.test(text)) {
+      text = `'${text}`;
+    }
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+
+  private getBatchPublicDir(batch: PodGenerationBatchEntity) {
+    const normalized = String(batch.outputDir || '')
+      .split(path.sep)
+      .join('/');
+    const marker = '/generated/';
+    const index = normalized.lastIndexOf(marker);
+    if (index >= 0) {
+      return normalized.slice(index);
+    }
+
+    const relativeMarker = 'generated/';
+    const relativeIndex = normalized.lastIndexOf(relativeMarker);
+    if (relativeIndex >= 0) {
+      return `/${normalized.slice(relativeIndex)}`;
+    }
+
+    return path.posix.join(
+      '/generated',
+      moment(batch.createTime).format('YYYY-MM-DD'),
+      batch.topicSlug
+    );
   }
 
   private async runPool<T>(
@@ -829,7 +1102,7 @@ export class PodGenerationService extends BaseService {
       printFileName: image.fileName,
       printFilePath: image.filePath,
       batchOutputDir: batch.outputDir,
-      batchPublicDir: `/generated/temu-tshirt/${moment(batch.createTime).format('YYYY-MM-DD')}/${batch.topicSlug}`,
+      batchPublicDir: this.getBatchPublicDir(batch),
     });
   }
 
@@ -843,7 +1116,9 @@ export class PodGenerationService extends BaseService {
 
   private uniqueSeoFileName(value: string, used: Set<string>, index: number) {
     // 同一批次内文件名必须唯一，否则后生成的图片会覆盖前一张。
-    const base = this.podPromptService.slugify(value || `pod-tshirt-print-${index + 1}`);
+    const base = this.podPromptService.slugify(
+      value || `pod-tshirt-print-${index + 1}`
+    );
     let name = base;
     let offset = 1;
     while (used.has(name)) {
@@ -934,7 +1209,9 @@ export class PodGenerationService extends BaseService {
   }
 
   private compactLogText(value: string, maxLength: number) {
-    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    const text = String(value || '')
+      .replace(/\s+/g, ' ')
+      .trim();
     return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
   }
 

@@ -78,7 +78,10 @@ export class PodCutoutService {
         fileName: originalName,
         settings,
       });
-      const outputBuffer = await this.resizeToOutputSize(cutoutBuffer, settings);
+      const outputBuffer = await this.resizeToOutputSize(
+        cutoutBuffer,
+        settings
+      );
       const fileName = this.createOutputFileName(originalName);
       const filePath = path.join(outputDir, fileName);
 
@@ -99,7 +102,6 @@ export class PodCutoutService {
       };
     }
   }
-
 
   private formatDbError(err: any) {
     const raw = err?.message || String(err || '未知错误');
@@ -140,6 +142,9 @@ export class PodCutoutService {
         .replace(/-+/g, '-')
         .replace(/^-|-$/g, '')
         .slice(0, 80) || 'cutout';
-    return `${moment().format('YYYYMMDDHHmmss')}-${uuidv4().slice(0, 8)}-${safeName}.png`;
+    return `${moment().format('YYYYMMDDHHmmss')}-${uuidv4().slice(
+      0,
+      8
+    )}-${safeName}.png`;
   }
 }

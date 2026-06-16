@@ -96,13 +96,6 @@ export class PodSettingService {
     const raw = await this.readSettingsData(row?.data);
     const settings = await this.mergeSettings(raw);
 
-    // 旧版设置里没有 providerId 时，自动迁移成“选择供应商”的新结构。
-    if (row?.data && this.needsMigration(raw)) {
-      await this.settingEntity.update(row.id, {
-        data: JSON.stringify(this.toPersistedSettings(settings)),
-      });
-    }
-
     return settings;
   }
 
@@ -113,8 +106,14 @@ export class PodSettingService {
     const promptProviderId =
       Number(params?.prompt?.providerId) || current.prompt.providerId;
 
-    await this.podProviderConfigService.requireEnabled(imageProviderId, 'image');
-    await this.podProviderConfigService.requireEnabled(promptProviderId, 'prompt');
+    await this.podProviderConfigService.requireEnabled(
+      imageProviderId,
+      'image'
+    );
+    await this.podProviderConfigService.requireEnabled(
+      promptProviderId,
+      'prompt'
+    );
 
     const settings: PersistedPodSettings = {
       generation: {
@@ -129,7 +128,10 @@ export class PodSettingService {
           30000,
           600000
         ),
-        size: this.normalizeSize(params?.generation?.size, current.generation.size),
+        size: this.normalizeSize(
+          params?.generation?.size,
+          current.generation.size
+        ),
         outputSize: this.normalizeSize(
           params?.generation?.outputSize,
           current.generation.outputSize
@@ -155,7 +157,10 @@ export class PodSettingService {
           1024,
           64000
         ),
-        systemPrompt: this.str(params?.prompt?.systemPrompt, current.prompt.systemPrompt),
+        systemPrompt: this.str(
+          params?.prompt?.systemPrompt,
+          current.prompt.systemPrompt
+        ),
       },
       cutout: this.normalizeCutout(params?.cutout, current.cutout),
       unifiedPrompt: this.str(params?.unifiedPrompt, current.unifiedPrompt),
@@ -173,6 +178,10 @@ export class PodSettingService {
       });
     }
 
+    return this.getSettings();
+  }
+
+  async getPublicSettings() {
     return this.getSettings();
   }
 
@@ -198,26 +207,31 @@ export class PodSettingService {
 
   private async mergeSettings(value: any): Promise<PodModuleSettings> {
     const defaults = this.defaultRawSettings();
-    const imageProvider = await this.podProviderConfigService.resolveForSettings(
-      'image',
-      value?.generation?.providerId,
-      {
-        ...defaults.generation,
-        ...(value?.generation || {}),
-      }
-    );
-    const promptProvider = await this.podProviderConfigService.resolveForSettings(
-      'prompt',
-      value?.prompt?.providerId,
-      {
-        ...defaults.prompt,
-        ...(value?.prompt || {}),
-      }
-    );
+    const imageProvider =
+      await this.podProviderConfigService.resolveForSettings(
+        'image',
+        value?.generation?.providerId,
+        {
+          ...defaults.generation,
+          ...(value?.generation || {}),
+        }
+      );
+    const promptProvider =
+      await this.podProviderConfigService.resolveForSettings(
+        'prompt',
+        value?.prompt?.providerId,
+        {
+          ...defaults.prompt,
+          ...(value?.prompt || {}),
+        }
+      );
 
     return {
       generation: {
-        outputDir: this.str(value?.generation?.outputDir, defaults.generation.outputDir),
+        outputDir: this.str(
+          value?.generation?.outputDir,
+          defaults.generation.outputDir
+        ),
         providerId: imageProvider.id,
         provider: imageProvider.code,
         providerName: imageProvider.name,
@@ -232,7 +246,10 @@ export class PodSettingService {
         endpoint: imageProvider.endpoint,
         apiKey: imageProvider.apiKey,
         model: imageProvider.model,
-        size: this.normalizeSize(value?.generation?.size, defaults.generation.size),
+        size: this.normalizeSize(
+          value?.generation?.size,
+          defaults.generation.size
+        ),
         outputSize: this.normalizeSize(
           value?.generation?.outputSize,
           defaults.generation.outputSize
@@ -274,44 +291,11 @@ export class PodSettingService {
     };
   }
 
-  private toPersistedSettings(settings: PodModuleSettings): PersistedPodSettings {
-    return {
-      generation: {
-        outputDir: settings.generation.outputDir,
-        providerId: settings.generation.providerId,
-        timeoutMs: settings.generation.timeoutMs,
-        size: settings.generation.size,
-        outputSize: settings.generation.outputSize,
-      },
-      prompt: {
-        providerId: settings.prompt.providerId,
-        timeoutMs: settings.prompt.timeoutMs,
-        temperature: settings.prompt.temperature,
-        maxTokens: settings.prompt.maxTokens,
-        systemPrompt: settings.prompt.systemPrompt,
-      },
-      cutout: settings.cutout,
-      unifiedPrompt: settings.unifiedPrompt,
-    };
-  }
-
-  private needsMigration(value: any) {
-    return (
-      !value?.generation?.providerId ||
-      !value?.prompt?.providerId ||
-      value?.generation?.endpoint ||
-      value?.generation?.apiKey ||
-      value?.generation?.model ||
-      value?.prompt?.endpoint ||
-      value?.prompt?.apiKey ||
-      value?.prompt?.model
-    );
-  }
-
   private defaultRawSettings() {
     return {
       generation: {
-        outputDir: this.generationConfig?.outputDir || '../generated/temu-tshirt',
+        outputDir:
+          this.generationConfig?.outputDir || '../generated/temu-tshirt',
         provider: this.generationConfig?.provider || 'rightcodes',
         protocol: this.generationConfig?.protocol || 'openai-images',
         concurrency: Number(this.generationConfig?.concurrency || 3),
@@ -335,7 +319,8 @@ export class PodSettingService {
         model: this.promptConfig?.model || 'deepseek-v4-pro',
         temperature: Number(this.promptConfig?.temperature ?? 0.7),
         maxTokens: Number(this.promptConfig?.maxTokens || 8192),
-        systemPrompt: this.promptConfig?.systemPrompt || DEFAULT_POD_SYSTEM_PROMPT,
+        systemPrompt:
+          this.promptConfig?.systemPrompt || DEFAULT_POD_SYSTEM_PROMPT,
       },
       cutout: {
         enabled: this.cutoutConfig?.enabled ?? true,
@@ -364,7 +349,12 @@ export class PodSettingService {
         0,
         255
       ),
-      processRes: this.numInRange(value?.processRes, defaults.processRes, 256, 2048),
+      processRes: this.numInRange(
+        value?.processRes,
+        defaults.processRes,
+        256,
+        2048
+      ),
       maskBlur: this.numInRange(value?.maskBlur, defaults.maskBlur, 0, 64),
       subjectMaskOffset: this.numInRange(
         value?.subjectMaskOffset,
@@ -393,7 +383,12 @@ export class PodSettingService {
     return Math.min(max, Math.max(min, Math.trunc(num)));
   }
 
-  private numFloatInRange(value: any, fallback: number, min: number, max: number) {
+  private numFloatInRange(
+    value: any,
+    fallback: number,
+    min: number,
+    max: number
+  ) {
     const num = Number(value);
     if (!Number.isFinite(num)) {
       return fallback;

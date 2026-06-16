@@ -36,7 +36,8 @@ export class PodProviderConfigService extends BaseService {
   async add(param: any) {
     const data = await this.normalizeInput(param);
     await this.ensureCodeUnique(data.type, data.code);
-    return super.add(data);
+    const saved = await this.providerEntity.save(data);
+    return saved;
   }
 
   async update(param: any) {
@@ -46,14 +47,23 @@ export class PodProviderConfigService extends BaseService {
     }
     const data = await this.normalizeInput({ ...old, ...param }, old);
     await this.ensureCodeUnique(data.type, data.code, old.id);
-    if (!String(param.apiKey || '').trim()) {
+    if (this.shouldKeepOldApiKey(param.apiKey)) {
       data.apiKey = old.apiKey;
     }
-    return super.update(data);
+    await this.providerEntity.save(data);
+    return;
   }
 
   async info(id: any) {
     return this.providerEntity.findOneBy({ id: Number(id) });
+  }
+
+  async page(query: any, option: any, connectionName?: any) {
+    return super.page(query, option, connectionName);
+  }
+
+  async list(query: any, option: any, connectionName?: any) {
+    return super.list(query, option, connectionName);
   }
 
   async options(type?: PodProviderType) {
@@ -67,7 +77,10 @@ export class PodProviderConfigService extends BaseService {
       query.andWhere('a.type = :type', { type });
     }
 
-    return query.orderBy('a.orderNum', 'ASC').addOrderBy('a.id', 'ASC').getMany();
+    return query
+      .orderBy('a.orderNum', 'ASC')
+      .addOrderBy('a.id', 'ASC')
+      .getMany();
   }
 
   async ensureDefaultProviders() {
@@ -174,7 +187,7 @@ export class PodProviderConfigService extends BaseService {
           { ...exists, ...input, type, id: exists.id },
           exists
         );
-        if (!String(input.apiKey || '').trim()) {
+        if (this.shouldKeepOldApiKey(input.apiKey)) {
           merged.apiKey = exists.apiKey;
         }
         await this.providerEntity.save(merged);
@@ -192,7 +205,10 @@ export class PodProviderConfigService extends BaseService {
       throw new CoolCommException('请填写供应商标识');
     }
 
-    const protocol = this.normalizeProtocol(type, input.protocol || old?.protocol);
+    const protocol = this.normalizeProtocol(
+      type,
+      input.protocol || old?.protocol
+    );
 
     return {
       id: input.id ? Number(input.id) : undefined,
@@ -203,16 +219,26 @@ export class PodProviderConfigService extends BaseService {
         typeof input.enabled === 'boolean'
           ? input.enabled
           : input.enabled === undefined
-            ? (old?.enabled ?? true)
-            : Boolean(input.enabled),
+          ? old?.enabled ?? true
+          : Boolean(input.enabled),
       protocol,
       endpoint: this.str(input.endpoint ?? old?.endpoint, ''),
       apiKey: this.str(input.apiKey ?? old?.apiKey, ''),
       model: this.str(input.model ?? old?.model, ''),
-      concurrency: this.numInRange(input.concurrency, old?.concurrency || 3, 1, 100),
+      concurrency: this.numInRange(
+        input.concurrency,
+        old?.concurrency || 3,
+        1,
+        100
+      ),
       orderNum: this.numInRange(input.orderNum, old?.orderNum || 0, 0, 999999),
       remark: this.str(input.remark ?? old?.remark, ''),
     };
+  }
+
+  private shouldKeepOldApiKey(value: any) {
+    const text = String(value || '').trim();
+    return !text || /^\*+$/.test(text);
   }
 
   private async ensureCodeUnique(type: string, code: string, id?: number) {
@@ -255,5 +281,4 @@ export class PodProviderConfigService extends BaseService {
     }
     return Math.min(max, Math.max(min, Math.trunc(num)));
   }
-
 }

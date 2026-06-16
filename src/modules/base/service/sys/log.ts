@@ -53,8 +53,15 @@ export class BaseSysLogService extends BaseService {
     }
     const keepDay = await this.baseSysConfService.getValue('logKeep');
     if (keepDay) {
-      const beforeDate = moment().add(-keepDay, 'days').startOf('day').format('YYYY-MM-DD HH:mm:ss');
-      await this.baseSysLogEntity.createQueryBuilder().delete().where('createTime < :beforeDate', { beforeDate }).execute();
+      const beforeDate = moment()
+        .add(-keepDay, 'days')
+        .startOf('day')
+        .format('YYYY-MM-DD HH:mm:ss');
+      await this.baseSysLogEntity
+        .createQueryBuilder()
+        .delete()
+        .where('createTime < :beforeDate', { beforeDate })
+        .execute();
     } else {
       await this.baseSysLogEntity.clear();
     }

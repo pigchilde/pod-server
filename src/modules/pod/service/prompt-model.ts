@@ -48,7 +48,7 @@ export class PodPromptModelService {
   ) {
     const promptConfig = settings.prompt;
     const res = await axios.post(
-      promptConfig.endpoint || 'https://api.deepseek.com/chat/completions',
+      this.requireEndpoint(promptConfig.endpoint, 'OpenAI Chat'),
       {
         model: promptConfig.model || 'deepseek-v4-pro',
         messages: [
@@ -62,6 +62,7 @@ export class PodPromptModelService {
           },
         ],
         temperature: promptConfig.temperature,
+        max_tokens: promptConfig.maxTokens || 8192,
         stream: false,
       },
       {
@@ -87,7 +88,7 @@ export class PodPromptModelService {
   ) {
     const promptConfig = settings.prompt;
     const res = await axios.post(
-      promptConfig.endpoint || 'https://api.avemujica.moe/v1/messages',
+      this.requireEndpoint(promptConfig.endpoint, 'Anthropic Messages'),
       {
         model: promptConfig.model || 'claude-opus-4-8',
         max_tokens: promptConfig.maxTokens || 8192,
@@ -157,13 +158,27 @@ Rules:
       throw new Error(`提示词模型返回 ${items.length} 条，期望 ${count} 条`);
     }
 
-    return items.map((item, index) => ({
-      subTheme: String(item.subTheme || `prompt ${index + 1}`).slice(0, 120),
-      prompt: String(item.prompt || '').trim(),
-      seoFileName: this.slugify(item.seoFileName || item.seoTitle || item.subTheme),
-      seoTitle: item.seoTitle ? String(item.seoTitle).slice(0, 180) : '',
-      tags: Array.isArray(item.tags) ? item.tags.map(tag => String(tag)) : [],
-    }));
+    const seenPrompts = new Set<string>();
+    return items.map((item, index) => {
+      const prompt = String(item.prompt || '').trim();
+      if (!prompt) {
+        throw new Error(`提示词模型第 ${index + 1} 条 prompt 为空`);
+      }
+      const promptKey = prompt.toLowerCase().replace(/\s+/g, ' ');
+      if (seenPrompts.has(promptKey)) {
+        throw new Error(`提示词模型第 ${index + 1} 条 prompt 与前文重复`);
+      }
+      seenPrompts.add(promptKey);
+      return {
+        subTheme: String(item.subTheme || `prompt ${index + 1}`).slice(0, 120),
+        prompt,
+        seoFileName: this.slugify(
+          item.seoFileName || item.seoTitle || item.subTheme
+        ),
+        seoTitle: item.seoTitle ? String(item.seoTitle).slice(0, 180) : '',
+        tags: Array.isArray(item.tags) ? item.tags.map(tag => String(tag)) : [],
+      };
+    });
   }
 
   private extractJson(content: string) {
@@ -189,8 +204,18 @@ Rules:
       .join('-');
   }
 
+  private requireEndpoint(endpoint: string, label: string) {
+    const value = String(endpoint || '').trim();
+    if (!value) {
+      throw new Error(`${label} 提示词模型 endpoint 未配置`);
+    }
+    return value;
+  }
+
   private normalizeProtocol(value: string): PromptProtocol {
-    return value === 'anthropic-messages' ? 'anthropic-messages' : 'openai-chat';
+    return value === 'anthropic-messages'
+      ? 'anthropic-messages'
+      : 'openai-chat';
   }
 
   private readAnthropicText(content: any) {
@@ -205,7 +230,9 @@ Rules:
         if (typeof item === 'string') {
           return item;
         }
-        return item?.type === 'text' || item?.text ? String(item.text || '') : '';
+        return item?.type === 'text' || item?.text
+          ? String(item.text || '')
+          : '';
       })
       .filter(Boolean)
       .join('\n');

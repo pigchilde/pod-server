@@ -48,7 +48,7 @@
           {
             "name": "执行",
             "router": null,
-            "perms": "pod:generation:runBatch,pod:generation:retryFailed,pod:generation:retryItem,pod:generation:retryItems,pod:generation:updatePrompt,pod:generation:approvePrompts,pod:generation:rejectPrompts",
+            "perms": "pod:generation:runBatch,pod:generation:retryFailed,pod:generation:retryItem,pod:generation:retryItems,pod:generation:updatePrompt,pod:generation:approvePrompts",
             "type": 2,
             "icon": null,
             "orderNum": 3,

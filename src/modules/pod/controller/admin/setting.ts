@@ -19,7 +19,7 @@ export class AdminPodSettingController extends BaseController {
    */
   @Get('/info', { summary: '获得设置' })
   async info() {
-    return this.ok(await this.podSettingService.getSettings());
+    return this.ok(await this.podSettingService.getPublicSettings());
   }
 
   /**

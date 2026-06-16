@@ -117,14 +117,6 @@ export class AdminPodGenerationController extends BaseController {
   }
 
   /**
-   * 驳回提示词
-   */
-  @Post('/rejectPrompts', { summary: '驳回提示词' })
-  async rejectPrompts(@Body() body: any) {
-    return this.ok(await this.podGenerationService.rejectPrompts(body));
-  }
-
-  /**
    * 批次详情
    */
   @Get('/detail', { summary: '批次详情' })

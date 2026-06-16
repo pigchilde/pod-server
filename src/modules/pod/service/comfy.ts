@@ -1,8 +1,8 @@
-import { Provide } from '@midwayjs/core';
+import { Inject, Provide } from '@midwayjs/core';
 import axios from 'axios';
 import * as sharp from 'sharp';
 import { v4 as uuidv4 } from 'uuid';
-import { PodModuleSettings } from './setting';
+import { PodModuleSettings, PodSettingService } from './setting';
 
 export interface PodComfyCutoutInput {
   buffer: Buffer;
@@ -21,7 +21,23 @@ interface ComfyOutputImage {
  */
 @Provide()
 export class PodComfyService {
+  @Inject()
+  podSettingService: PodSettingService;
+
+  private cutoutQueue: Promise<any> = Promise.resolve();
+  private activeCutoutCount = 0;
+  private lastFreeAt = 0;
+
   async removeBackground(input: PodComfyCutoutInput) {
+    // ComfyUI/RMBG 在 6GB 显存 Win 主机上不适合并发执行，这里强制串行，避免互相抢占显存。
+    const task = this.cutoutQueue.then(() =>
+      this.removeBackgroundInternal(input)
+    );
+    this.cutoutQueue = task.catch(() => undefined);
+    return task;
+  }
+
+  private async removeBackgroundInternal(input: PodComfyCutoutInput) {
     const config = input.settings.cutout;
     if (!config?.enabled) {
       return input.buffer;
@@ -29,14 +45,65 @@ export class PodComfyService {
 
     const endpoint = this.normalizeEndpoint(config.endpoint);
     const timeoutMs = Number(config.timeoutMs || 180000);
-    const uploadedName = await this.uploadImage(endpoint, input, timeoutMs);
-    const promptId = await this.queuePrompt(endpoint, uploadedName, input.settings, timeoutMs);
-    const output = await this.waitForOutput(endpoint, promptId, timeoutMs);
-    const [imageBuffer, maskBuffer] = await Promise.all([
-      this.downloadImage(endpoint, output.image, timeoutMs),
-      this.downloadImage(endpoint, output.mask, timeoutMs),
-    ]);
-    return this.composeAlpha(imageBuffer, maskBuffer);
+    this.activeCutoutCount += 1;
+    try {
+      const uploadedName = await this.uploadImage(endpoint, input, timeoutMs);
+      const promptId = await this.queuePrompt(
+        endpoint,
+        uploadedName,
+        input.settings,
+        timeoutMs
+      );
+      const output = await this.waitForOutput(endpoint, promptId, timeoutMs);
+      const [imageBuffer, maskBuffer] = await Promise.all([
+        this.downloadImage(endpoint, output.image, timeoutMs),
+        this.downloadImage(endpoint, output.mask, timeoutMs),
+      ]);
+      return this.composeAlpha(imageBuffer, maskBuffer);
+    } finally {
+      this.activeCutoutCount = Math.max(0, this.activeCutoutCount - 1);
+      await this.freeMemory(endpoint, 'after-cutout');
+    }
+  }
+
+  async freeMemoryIfIdle(reason = 'idle-schedule') {
+    if (this.activeCutoutCount > 0) {
+      return false;
+    }
+    await this.cutoutQueue.catch(() => undefined);
+    if (this.activeCutoutCount > 0) {
+      return false;
+    }
+    const settings = await this.podSettingService.getSettings();
+    if (!settings.cutout?.enabled || !settings.cutout?.endpoint) {
+      return false;
+    }
+    await this.freeMemory(
+      this.normalizeEndpoint(settings.cutout.endpoint),
+      reason
+    );
+    return true;
+  }
+
+  private async freeMemory(endpoint: string, reason: string) {
+    try {
+      await axios.post(
+        `${endpoint}/free`,
+        {
+          unload_models: true,
+          free_memory: true,
+        },
+        { timeout: 10000 }
+      );
+      this.lastFreeAt = Date.now();
+      console.info(`[POD_COMFY_FREE] reason=${reason} endpoint=${endpoint}`);
+    } catch (err) {
+      console.warn(
+        `[POD_COMFY_FREE_FAIL] reason=${reason} endpoint=${endpoint} err=${
+          err?.message || err
+        }`
+      );
+    }
   }
 
   private async uploadImage(
@@ -57,7 +124,9 @@ export class PodComfyService {
     const res = await axios.post(`${endpoint}/upload/image`, form, {
       timeout: timeoutMs,
     });
-    return res.data?.name || fileName;
+    const name = res.data?.name || fileName;
+    const subfolder = String(res.data?.subfolder || '').trim();
+    return subfolder ? `${subfolder}/${name}` : name;
   }
 
   private async queuePrompt(
@@ -81,7 +150,11 @@ export class PodComfyService {
     return promptId;
   }
 
-  private async waitForOutput(endpoint: string, promptId: string, timeoutMs: number) {
+  private async waitForOutput(
+    endpoint: string,
+    promptId: string,
+    timeoutMs: number
+  ) {
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
       const res = await axios.get(`${endpoint}/history/${promptId}`, {
@@ -107,18 +180,26 @@ export class PodComfyService {
     throw new Error('ComfyUI RMBG 黑底抠图超时');
   }
 
-
   private formatComfyError(messages: any[]) {
     const executionError = Array.isArray(messages)
-      ? messages.find(item => Array.isArray(item) && item[0] === 'execution_error')?.[1]
+      ? messages.find(
+          item => Array.isArray(item) && item[0] === 'execution_error'
+        )?.[1]
       : null;
-    const nodeType = executionError?.node_type || executionError?.node_id || 'unknown';
-    const message = executionError?.exception_message || JSON.stringify(messages || []);
-    return `ComfyUI RMBG 黑底抠图失败：${nodeType} ${this.compactText(message, 700)}`;
+    const nodeType =
+      executionError?.node_type || executionError?.node_id || 'unknown';
+    const message =
+      executionError?.exception_message || JSON.stringify(messages || []);
+    return `ComfyUI RMBG 黑底抠图失败：${nodeType} ${this.compactText(
+      message,
+      700
+    )}`;
   }
 
   private compactText(value: any, maxLength: number) {
-    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    const text = String(value || '')
+      .replace(/\s+/g, ' ')
+      .trim();
     if (text.length <= maxLength) {
       return text;
     }
@@ -297,7 +378,12 @@ export class PodComfyService {
       blackThreshold: this.intInRange(cutout?.blackThreshold, 34, 0, 255),
       processRes: this.intInRange(cutout?.processRes, 1536, 256, 2048),
       maskBlur: this.intInRange(cutout?.maskBlur, 1, 0, 64),
-      subjectMaskOffset: this.intInRange(cutout?.subjectMaskOffset, -1, -64, 64),
+      subjectMaskOffset: this.intInRange(
+        cutout?.subjectMaskOffset,
+        -1,
+        -64,
+        64
+      ),
     };
   }
 
