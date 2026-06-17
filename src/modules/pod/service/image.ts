@@ -79,14 +79,11 @@ export class PodImageService {
       settings
     );
     const parsedPath = path.parse(input.filePath);
-    const parsedUrl = path.posix.parse(
-      this.stripUrlQuery(input.imageUrl || '')
-    );
+    const cleanImageUrl = String(input.imageUrl || '').split(/[?#]/)[0];
+    const parsedUrl = path.posix.parse(cleanImageUrl);
     const fileName = `${parsedPath.name}.png`;
     const filePath = path.join(parsedPath.dir, fileName);
-    const imageUrl = this.withCacheVersion(
-      path.posix.join(parsedUrl.dir || '/', fileName)
-    );
+    const imageUrl = path.posix.join(parsedUrl.dir || '/', fileName);
 
     await fs.promises.writeFile(filePath, outputBuffer);
     if (filePath !== input.filePath && fs.existsSync(input.filePath)) {
@@ -239,22 +236,10 @@ export class PodImageService {
     return {
       fileName,
       filePath,
-      imageUrl: this.withCacheVersion(
-        path.posix.join(input.publicDir, fileName)
-      ),
+      imageUrl: path.posix.join(input.publicDir, fileName),
       postProcessError,
     };
   }
-
-  private stripUrlQuery(url: string) {
-    return String(url || '').split(/[?#]/)[0];
-  }
-
-  private withCacheVersion(url: string) {
-    // 生图、重生成、抠图都会覆盖同名文件；URL 每次落库都换版本，避免浏览器继续显示旧缓存。
-    return `${this.stripUrlQuery(url)}?v=${Date.now()}`;
-  }
-
   private async removeBackground(
     buffer: Buffer,
     input: PodGenerateImageInput,

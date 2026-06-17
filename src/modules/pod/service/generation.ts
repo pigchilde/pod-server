@@ -354,7 +354,7 @@ export class PodGenerationService extends BaseService {
 
       await this.itemEntity.update(
         { batchId: id, status: 'failed', promptStatus: 'approved' },
-        { status: 'pending', error: null }
+        { status: 'pending', error: null, providerImageUrl: null }
       );
       await this.batchEntity.update(id, {
         status: 'image_generating',
@@ -386,7 +386,11 @@ export class PodGenerationService extends BaseService {
     }
     const batch = await this.ensureBatch(item.batchId);
     await this.ensureBatchNotProcessing(batch.id);
-    await this.itemEntity.update(id, { status: 'pending', error: null });
+    await this.itemEntity.update(id, {
+      status: 'pending',
+      error: null,
+      providerImageUrl: null,
+    });
     const pendingItem = await this.itemEntity.findOneBy({ id });
     await this.runItemsWithRetries(
       pendingItem ? [pendingItem] : [],
@@ -433,7 +437,7 @@ export class PodGenerationService extends BaseService {
     await this.ensureBatchNotProcessing(batchId);
     await this.itemEntity.update(
       { id: In(ids) },
-      { status: 'pending', error: null }
+      { status: 'pending', error: null, providerImageUrl: null }
     );
     await this.batchEntity.update(batchId, {
       status: 'image_generating',
