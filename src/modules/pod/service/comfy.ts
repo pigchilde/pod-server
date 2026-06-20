@@ -8,6 +8,13 @@ export interface PodComfyCutoutInput {
   buffer: Buffer;
   fileName: string;
   settings: PodModuleSettings;
+  context?: {
+    batchId?: number;
+    batchNo?: string;
+    itemId?: number;
+    itemNo?: string;
+    fileName?: string;
+  };
 }
 
 interface ComfyOutputImage {
@@ -62,7 +69,7 @@ export class PodComfyService {
       return this.composeAlpha(imageBuffer, maskBuffer);
     } finally {
       this.activeCutoutCount = Math.max(0, this.activeCutoutCount - 1);
-      await this.freeMemory(endpoint, 'after-cutout');
+      await this.freeMemory(endpoint, 'after-cutout', input.context);
     }
   }
 
@@ -78,14 +85,16 @@ export class PodComfyService {
     if (!settings.cutout?.enabled || !settings.cutout?.endpoint) {
       return false;
     }
-    await this.freeMemory(
-      this.normalizeEndpoint(settings.cutout.endpoint),
-      reason
-    );
+    await this.freeMemory(this.normalizeEndpoint(settings.cutout.endpoint), reason);
     return true;
   }
 
-  private async freeMemory(endpoint: string, reason: string) {
+  private async freeMemory(
+    endpoint: string,
+    reason: string,
+    context?: PodComfyCutoutInput['context']
+  ) {
+    const contextText = this.formatContext(context);
     try {
       await axios.post(
         `${endpoint}/free`,
@@ -96,10 +105,12 @@ export class PodComfyService {
         { timeout: 10000 }
       );
       this.lastFreeAt = Date.now();
-      console.info(`[POD_COMFY_FREE] reason=${reason} endpoint=${endpoint}`);
+      console.info(
+        `[POD_COMFY_FREE] reason=${reason} endpoint=${endpoint}${contextText}`
+      );
     } catch (err) {
       console.warn(
-        `[POD_COMFY_FREE_FAIL] reason=${reason} endpoint=${endpoint} err=${
+        `[POD_COMFY_FREE_FAIL] reason=${reason} endpoint=${endpoint}${contextText} err=${
           err?.message || err
         }`
       );
@@ -204,6 +215,17 @@ export class PodComfyService {
       return text;
     }
     return `${text.slice(0, maxLength)}...`;
+  }
+
+  private formatContext(context?: PodComfyCutoutInput['context']) {
+    if (!context) {
+      return '';
+    }
+    return [
+      context.batchId ? ` batch=${context.batchId}/${context.batchNo || '-'}` : '',
+      context.itemId ? ` item=${context.itemId}/${context.itemNo || '-'}` : '',
+      context.fileName ? ` file="${this.compactText(context.fileName, 80)}"` : '',
+    ].join('');
   }
 
   private async downloadImage(

@@ -66,6 +66,45 @@ export class PodGenerationItemEntity extends BaseEntity {
 
   @Index()
   @Column({
+    comment: '抠图状态 pending/running/success/failed/skipped',
+    length: 30,
+    default: 'pending',
+  })
+  cutoutStatus: string;
+
+  @Column({ comment: '抠图尝试次数', default: 0 })
+  cutoutAttempts: number;
+
+  @Column({ comment: '抠图错误信息', nullable: true, length: 1000 })
+  cutoutError: string;
+
+  @Index()
+  @Column({
+    comment: '效果图状态 pending/success/failed/skipped',
+    length: 30,
+    default: 'pending',
+  })
+  mockupStatus: string;
+
+  @Column({ comment: '效果图错误信息', nullable: true, length: 1000 })
+  mockupError: string;
+
+  @Column({ comment: '效果图尝试次数', default: 0 })
+  mockupAttempts: number;
+
+  @Index()
+  @Column({
+    comment: '产物检查状态 pending/ok/warning/failed',
+    length: 30,
+    default: 'pending',
+  })
+  verifyStatus: string;
+
+  @Column({ comment: '产物检查信息', nullable: true, length: 1000 })
+  verifyError: string;
+
+  @Index()
+  @Column({
     comment: '状态 pending/running/cutout_running/success/failed',
     length: 30,
     default: 'pending',

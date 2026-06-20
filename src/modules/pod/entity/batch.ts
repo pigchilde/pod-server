@@ -55,6 +55,14 @@ export class PodGenerationBatchEntity extends BaseEntity {
   @Column({ comment: '输出目录', nullable: true, length: 500 })
   outputDir: string;
 
+  @Index()
+  @Column({ comment: '导入任务ID', nullable: true })
+  importId: number;
+
+  @Index()
+  @Column({ comment: '导入行ID', nullable: true })
+  importRowId: number;
+
   @Column({
     comment: '扩展配置',
     nullable: true,

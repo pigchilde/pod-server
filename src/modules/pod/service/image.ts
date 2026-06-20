@@ -14,6 +14,7 @@ export interface PodGenerateImageInput {
   timeoutMs: number;
   providerImageUrl?: string;
   onProviderImageUrl?: (url: string) => Promise<void>;
+  cutoutContext?: PodCutoutContext;
 }
 
 export interface PodGenerateImageResult {
@@ -28,6 +29,15 @@ export interface PodCutoutImageInput {
   fileName: string;
   filePath: string;
   imageUrl: string;
+  context?: PodCutoutContext;
+}
+
+export interface PodCutoutContext {
+  batchId?: number;
+  batchNo?: string;
+  itemId?: number;
+  itemNo?: string;
+  fileName?: string;
 }
 
 /**
@@ -72,6 +82,7 @@ export class PodImageService {
       buffer: sourceBuffer,
       fileName: input.fileName || path.basename(input.filePath),
       settings,
+      context: input.context,
     });
     const outputBuffer = await this.resizeToOutputSize(
       cutoutBuffer,
@@ -254,6 +265,7 @@ export class PodImageService {
       buffer,
       fileName: `${input.fileBaseName}.${ext || 'png'}`,
       settings,
+      context: input.cutoutContext,
     });
   }
 
