@@ -85,7 +85,10 @@ export class PodComfyService {
     if (!settings.cutout?.enabled || !settings.cutout?.endpoint) {
       return false;
     }
-    await this.freeMemory(this.normalizeEndpoint(settings.cutout.endpoint), reason);
+    await this.freeMemory(
+      this.normalizeEndpoint(settings.cutout.endpoint),
+      reason
+    );
     return true;
   }
 
@@ -222,9 +225,13 @@ export class PodComfyService {
       return '';
     }
     return [
-      context.batchId ? ` batch=${context.batchId}/${context.batchNo || '-'}` : '',
+      context.batchId
+        ? ` batch=${context.batchId}/${context.batchNo || '-'}`
+        : '',
       context.itemId ? ` item=${context.itemId}/${context.itemNo || '-'}` : '',
-      context.fileName ? ` file="${this.compactText(context.fileName, 80)}"` : '',
+      context.fileName
+        ? ` file="${this.compactText(context.fileName, 80)}"`
+        : '',
     ].join('');
   }
 

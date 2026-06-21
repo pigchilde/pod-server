@@ -30,6 +30,22 @@ export class PodGenerationImportService extends BaseService {
     this.setEntity(this.importEntity);
   }
 
+  async delete(ids: any) {
+    const idArr = (Array.isArray(ids) ? ids : String(ids).split(','))
+      .map(id => Number(id))
+      .filter(Boolean);
+    if (!idArr.length) {
+      return;
+    }
+
+    await this.importEntity.manager.transaction(async manager => {
+      await manager.delete(PodGenerationImportRowEntity, {
+        importId: In(idArr),
+      });
+      await manager.delete(PodGenerationImportEntity, { id: In(idArr) });
+    });
+  }
+
   async detail(id: number) {
     const record = await this.importEntity.findOneBy({ id: Number(id) });
     if (!record) {
