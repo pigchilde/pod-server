@@ -15,5 +15,5 @@ Provider credentials and endpoints live in `pod_provider_config`. Module
 settings select one image provider and one prompt provider, while shared
 generation parameters such as image size, output size, timeout, temperature,
 max tokens, and system prompt stay in module settings. A new batch uses the
-image provider's default concurrency when the request or import row does not
-specify `concurrency`.
+selected image provider's concurrency setting. Request bodies and import rows
+do not override image generation concurrency.

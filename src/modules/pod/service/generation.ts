@@ -101,13 +101,7 @@ export class PodGenerationService extends BaseService {
     const settings = await this.podSettingService.getSettings();
     const count = this.clamp(Number(params.count || 10), 1, 100);
     const providerConcurrency = Number(settings.generation.concurrency || 0);
-    const rawConcurrency =
-      params.concurrency === undefined ||
-      params.concurrency === null ||
-      params.concurrency === ''
-        ? providerConcurrency || count
-        : Number(params.concurrency);
-    const concurrency = this.clamp(Number(rawConcurrency || count), 1, 100);
+    const concurrency = this.clamp(Number(providerConcurrency || 3), 1, 100);
     const retries = this.clamp(Number(params.retries ?? 1), 0, 5);
     const autoRun = params.autoRun !== false;
     const timeoutMs = this.clamp(
@@ -231,11 +225,6 @@ export class PodGenerationService extends BaseService {
       const row = rows[index] || {};
       const topic = this.pickText(row, ['topic', '主题', '生成主题', '题目']);
       const count = this.pickNumber(row, ['count', '数量', '张数', '生成数量']);
-      const concurrency = this.pickNumber(row, [
-        'concurrency',
-        '并发',
-        '并发数',
-      ]);
       const retries = this.pickNumber(row, [
         'retries',
         '失败重试',
@@ -278,7 +267,6 @@ export class PodGenerationService extends BaseService {
         const batch = await this.createBatch({
           topic,
           count,
-          concurrency: concurrency || params.concurrency,
           retries: retries ?? params.retries,
           timeoutMs: params.timeoutMs,
           autoRun: params.autoRun !== false,
@@ -322,10 +310,12 @@ export class PodGenerationService extends BaseService {
     const success = results.filter(item => item.status === 'success').length;
     const failed = results.length - success;
     const totalImages = results.reduce(
-      (sum, item: any) => sum + (item.status === 'success' ? Number(item.count || 0) : 0),
+      (sum, item: any) =>
+        sum + (item.status === 'success' ? Number(item.count || 0) : 0),
       0
     );
-    const status = failed === 0 ? 'completed' : success > 0 ? 'partial_failed' : 'failed';
+    const status =
+      failed === 0 ? 'completed' : success > 0 ? 'partial_failed' : 'failed';
     await this.importEntity.update(importRecord.id, {
       status,
       successRows: success,
@@ -340,6 +330,107 @@ export class PodGenerationService extends BaseService {
       success,
       failed,
       totalImages,
+      results,
+    };
+  }
+
+  async retryImportRow(id: number) {
+    const row = await this.importRowEntity.findOneBy({ id: Number(id) });
+    if (!row) {
+      throw new CoolCommException('导入行不存在');
+    }
+    if (row.batchId) {
+      throw new CoolCommException('该导入行已创建批次，请进入批次修复');
+    }
+    if (!row.topic) {
+      throw new CoolCommException('导入行主题为空，无法重试创建批次');
+    }
+    if (!row.count || row.count < 1) {
+      throw new CoolCommException('导入行数量无效，无法重试创建批次');
+    }
+
+    const record = await this.importEntity.findOneBy({ id: row.importId });
+    const options = record?.options || {};
+    await this.importRowEntity.update(row.id, {
+      status: 'pending',
+      error: null,
+    });
+
+    try {
+      const batch = await this.createBatch({
+        topic: row.topic,
+        count: row.count,
+        retries: options.retries,
+        timeoutMs: options.timeoutMs,
+        autoRun: options.autoRun !== false,
+        importId: row.importId,
+        importRowId: row.id,
+      });
+      await this.importRowEntity.update(row.id, {
+        status: 'created',
+        batchId: batch.id,
+        batchNo: batch.batchNo,
+        error: null,
+      });
+    } catch (err) {
+      await this.importRowEntity.update(row.id, {
+        status: 'failed',
+        batchId: err.podBatchId || null,
+        batchNo: err.podBatchNo || null,
+        error: this.formatDbError(err),
+      });
+      throw err;
+    } finally {
+      await this.refreshImportStats(row.importId);
+    }
+
+    return this.importRowEntity.findOneBy({ id: row.id });
+  }
+
+  async repairImportRow(id: number) {
+    const row = await this.importRowEntity.findOneBy({ id: Number(id) });
+    if (!row) {
+      throw new CoolCommException('导入行不存在');
+    }
+    if (!row.batchId) {
+      return this.retryImportRow(row.id);
+    }
+    await this.repairBatchFailures(row.batchId);
+    return this.importRowEntity.findOneBy({ id: row.id });
+  }
+
+  async repairImport(id: number) {
+    const importId = Number(id);
+    const record = await this.importEntity.findOneBy({ id: importId });
+    if (!record) {
+      throw new CoolCommException('导入记录不存在');
+    }
+    const rows = await this.importRowEntity.find({
+      where: { importId },
+      order: { rowNo: 'ASC', id: 'ASC' },
+    });
+    const results = [];
+    for (const row of rows) {
+      try {
+        if (row.batchId) {
+          await this.repairBatchFailures(row.batchId);
+          results.push({ rowId: row.id, rowNo: row.rowNo, status: 'repaired' });
+        } else if (row.status === 'failed') {
+          await this.retryImportRow(row.id);
+          results.push({ rowId: row.id, rowNo: row.rowNo, status: 'created' });
+        }
+      } catch (err) {
+        results.push({
+          rowId: row.id,
+          rowNo: row.rowNo,
+          status: 'failed',
+          error: this.formatDbError(err),
+        });
+      }
+    }
+    await this.refreshImportStats(importId);
+    return {
+      importId,
       results,
     };
   }
@@ -399,6 +490,7 @@ export class PodGenerationService extends BaseService {
 
       // 按批次配置的并发数执行；失败重试会回到队列尾部，避免长时间占住同一 worker。
       await this.runItemsWithRetries(items, batch.concurrency, batch.retries);
+      await this.retryImageFailuresOnce(batch);
       await this.retryPostProcessFailures(id);
       return this.finishBatch(id);
     } finally {
@@ -540,6 +632,7 @@ export class PodGenerationService extends BaseService {
       { id: In(ids) },
       {
         status: 'pending',
+        attempts: 0,
         error: null,
         providerImageUrl: null,
         cutoutStatus: 'pending',
@@ -558,6 +651,33 @@ export class PodGenerationService extends BaseService {
     await this.runItemsWithRetries(items, batch.concurrency, batch.retries);
     await this.retryPostProcessFailures(batchId);
     return this.refreshBatchAfterSingleOperation(batchId);
+  }
+
+  async repairBatchFailures(id: number) {
+    if (!this.acquireBatchLock(id)) {
+      throw new CoolCommException('当前批次正在生成中，请勿重复执行');
+    }
+
+    try {
+      const batch = await this.ensureBatch(id);
+      if ((await this.countActiveItems(id)) > 0) {
+        throw new CoolCommException('当前批次正在生成中，请稍后再修复');
+      }
+      await this.batchEntity.update(id, {
+        status: 'image_generating',
+        error: null,
+      });
+      await this.retryImageFailuresOnce(batch);
+      await this.retryPostProcessFailures(id);
+      return this.finishBatch(id);
+    } finally {
+      this.releaseBatchLock(id);
+    }
+  }
+
+  async recheckArtifacts(id: number) {
+    await this.ensureBatchNotProcessing(id);
+    return this.refreshBatchAfterSingleOperation(id);
   }
 
   async cutoutItem(id: number) {
@@ -1001,6 +1121,45 @@ export class PodGenerationService extends BaseService {
     await this.retryMockupFailures(batchId);
   }
 
+  private async retryImageFailuresOnce(batch: PodGenerationBatchEntity) {
+    const failedItems = await this.itemEntity.find({
+      where: {
+        batchId: batch.id,
+        status: 'failed',
+        promptStatus: 'approved',
+      },
+      order: { id: 'ASC' },
+    });
+    if (!failedItems.length) {
+      return;
+    }
+
+    await this.itemEntity.update(
+      { id: In(failedItems.map(item => item.id)) },
+      {
+        status: 'pending',
+        error: null,
+        providerImageUrl: null,
+        cutoutStatus: 'pending',
+        cutoutError: null,
+        mockupStatus: 'pending',
+        mockupError: null,
+        mockupAttempts: 0,
+        verifyStatus: 'pending',
+        verifyError: null,
+      }
+    );
+    const retryItems = await this.itemEntity.find({
+      where: {
+        id: In(failedItems.map(item => item.id)),
+        status: 'pending',
+        promptStatus: 'approved',
+      },
+      order: { id: 'ASC' },
+    });
+    await this.runItemsWithRetries(retryItems, batch.concurrency, 0);
+  }
+
   private async retryCutoutOnly(
     batch: PodGenerationBatchEntity,
     item: PodGenerationItemEntity
@@ -1139,10 +1298,27 @@ export class PodGenerationService extends BaseService {
           errors.push(this.formatDbError(err, '图片文件检查失败：'));
         }
       }
-      if (item.cutoutStatus === 'failed') {
+      if (item.cutoutStatus === 'success') {
+        if (!this.isTransparentPng(item.filePath)) {
+          warnings.push('抠图 PNG 未检测到透明通道');
+        }
+      } else if (item.cutoutStatus === 'failed') {
         warnings.push(item.cutoutError || '抠图失败');
       }
-      if (item.mockupStatus === 'failed') {
+      if (item.mockupStatus === 'success') {
+        if (!item.mockupFilePath || !fs.existsSync(item.mockupFilePath)) {
+          warnings.push('效果图文件不存在');
+        } else {
+          try {
+            const stat = await fs.promises.stat(item.mockupFilePath);
+            if (stat.size <= 1024) {
+              warnings.push('效果图文件过小');
+            }
+          } catch (err) {
+            warnings.push(this.formatDbError(err, '效果图文件检查失败：'));
+          }
+        }
+      } else if (item.mockupStatus === 'failed') {
         warnings.push(item.mockupError || '效果图生成失败');
       }
 
@@ -1651,6 +1827,57 @@ export class PodGenerationService extends BaseService {
 
   private createImportNo() {
     return `${moment().format('YYYYMMDD-HHmmss')}-${uuidv4().slice(0, 6)}`;
+  }
+
+  private async refreshImportStats(importId: number) {
+    const rows = await this.importRowEntity.find({ where: { importId } });
+    if (!rows.length) {
+      return;
+    }
+    const successRows = rows.filter(row => row.status === 'created').length;
+    const failedRows = rows.filter(row => row.status === 'failed').length;
+    const totalImages = rows.reduce(
+      (sum, row) =>
+        sum + (row.status === 'created' ? Number(row.count || 0) : 0),
+      0
+    );
+    const status =
+      failedRows === 0
+        ? 'completed'
+        : successRows > 0
+        ? 'partial_failed'
+        : 'failed';
+    await this.importEntity.update(importId, {
+      totalRows: rows.length,
+      successRows,
+      failedRows,
+      totalImages,
+      status,
+      error: failedRows ? `${failedRows} 行导入失败` : null,
+    });
+  }
+
+  private isTransparentPng(filePath: string) {
+    try {
+      if (!filePath || path.extname(filePath).toLowerCase() !== '.png') {
+        return false;
+      }
+      const buffer = fs.readFileSync(filePath);
+      const pngSignature = '89504e470d0a1a0a';
+      if (
+        buffer.length < 33 ||
+        buffer.slice(0, 8).toString('hex') !== pngSignature
+      ) {
+        return false;
+      }
+      const colorType = buffer[25];
+      if (colorType === 4 || colorType === 6) {
+        return true;
+      }
+      return buffer.includes(Buffer.from('tRNS'));
+    } catch {
+      return false;
+    }
   }
 
   private resolveOutputDir(date: string, topicSlug: string, outputDir: string) {

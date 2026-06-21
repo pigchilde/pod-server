@@ -1,5 +1,9 @@
 import { Body, Get, Inject, Post, Provide, Query } from '@midwayjs/core';
-import { BaseController, CoolController } from '@cool-midway/core';
+import {
+  BaseController,
+  CoolCommException,
+  CoolController,
+} from '@cool-midway/core';
 import { PodGenerationBatchEntity } from '../../entity/batch';
 import { PodGenerationService } from '../../service/generation';
 
@@ -69,6 +73,26 @@ export class AdminPodGenerationController extends BaseController {
   }
 
   /**
+   * 修复批次中的失败项和后处理失败项
+   */
+  @Post('/repairFailures', { summary: '修复批次失败项' })
+  async repairFailures(@Body('id') id: number) {
+    return this.ok(
+      await this.podGenerationService.repairBatchFailures(this.parseId(id))
+    );
+  }
+
+  /**
+   * 重新校验批次产物
+   */
+  @Post('/recheckArtifacts', { summary: '重新校验产物' })
+  async recheckArtifacts(@Body('id') id: number) {
+    return this.ok(
+      await this.podGenerationService.recheckArtifacts(this.parseId(id))
+    );
+  }
+
+  /**
    * 重新生成单个任务项
    */
   @Post('/retryItem', { summary: '重试任务项' })
@@ -130,5 +154,13 @@ export class AdminPodGenerationController extends BaseController {
   @Post('/items', { summary: '任务项分页' })
   async items(@Body() body: any) {
     return this.ok(await this.podGenerationService.items(body));
+  }
+
+  private parseId(id: number) {
+    const value = Number(id);
+    if (!value || !Number.isFinite(value)) {
+      throw new CoolCommException('缺少参数 id');
+    }
+    return value;
   }
 }

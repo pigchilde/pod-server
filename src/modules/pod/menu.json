@@ -48,7 +48,7 @@
           {
             "name": "执行",
             "router": null,
-            "perms": "pod:generation:runBatch,pod:generation:retryFailed,pod:generation:retryItem,pod:generation:retryItems,pod:generation:updatePrompt,pod:generation:approvePrompts",
+            "perms": "pod:generation:runBatch,pod:generation:retryFailed,pod:generation:repairFailures,pod:generation:recheckArtifacts,pod:generation:retryItem,pod:generation:retryItems,pod:generation:updatePrompt,pod:generation:approvePrompts",
             "type": 2,
             "icon": null,
             "orderNum": 3,
@@ -83,12 +83,24 @@
             "childMenus": []
           },
           {
+            "name": "修复",
+            "router": null,
+            "perms": "pod:import:retryRow,pod:import:repairRow,pod:import:repairImport",
+            "type": 2,
+            "icon": null,
+            "orderNum": 2,
+            "viewPath": null,
+            "keepAlive": false,
+            "isShow": true,
+            "childMenus": []
+          },
+          {
             "name": "删除",
             "router": null,
             "perms": "pod:import:delete",
             "type": 2,
             "icon": null,
-            "orderNum": 2,
+            "orderNum": 3,
             "viewPath": null,
             "keepAlive": false,
             "isShow": true,
