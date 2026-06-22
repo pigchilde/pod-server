@@ -30,7 +30,8 @@ export class PodGenerationImportRowEntity extends BaseEntity {
 
   @Index()
   @Column({
-    comment: '状态 pending/created/failed',
+    comment:
+      '状态 pending/creating_batch/prompt_generating/image_generating/post_processing/verifying/completed/created/failed',
     length: 30,
     default: 'pending',
   })

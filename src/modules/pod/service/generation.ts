@@ -16,6 +16,13 @@ import { PodPromptModelService } from './prompt-model';
 import { PodSettingService } from './setting';
 import { PodMockupService } from './mockup';
 
+class ImportRunNotAcquiredError extends Error {
+  constructor(message = '当前导入任务正在执行中或已结束') {
+    super(message);
+    this.name = 'ImportRunNotAcquiredError';
+  }
+}
+
 /**
  * POD批量生成
  */
@@ -56,12 +63,20 @@ export class PodGenerationService extends BaseService {
   }> = [];
   private artifactTimers = new Map<number, NodeJS.Timeout>();
   private runningBatchIds = new Set<number>();
+  private runningImportIds = new Set<number>();
 
   @Init()
   async init() {
     await super.init();
     // Cool 的基础 CRUD 仍然作用在“批次”表上，图片任务项单独走自定义接口。
     this.setEntity(this.batchEntity);
+    setImmediate(() => {
+      this.recoverImportTasks({ staleMinutes: 0 }).catch(err => {
+        console.error(
+          `[POD_IMPORT_RECOVER_INIT_FAILED] error=${this.formatDbError(err)}`
+        );
+      });
+    });
   }
 
   async delete(ids: any) {
@@ -95,6 +110,22 @@ export class PodGenerationService extends BaseService {
     const topic = String(params.topic || '').trim();
     if (!topic) {
       throw new CoolCommException('请输入生成主题');
+    }
+    const importRowId = params.importRowId ? Number(params.importRowId) : null;
+    if (importRowId) {
+      const existingBatch = await this.batchEntity.findOne({
+        where: { importRowId },
+        order: { id: 'DESC' },
+      });
+      if (existingBatch) {
+        await this.importRowEntity.update(importRowId, {
+          batchId: existingBatch.id,
+          batchNo: existingBatch.batchNo,
+        });
+        throw new CoolCommException(
+          '该导入行已存在批次，请使用导入行修复继续处理'
+        );
+      }
     }
 
     // 读取后台“模块设置”，让接口地址、模型、尺寸、输出目录等参数可以动态调整。
@@ -134,53 +165,53 @@ export class PodGenerationService extends BaseService {
       approvedPromptCount: 0,
       outputDir,
       importId: params.importId ? Number(params.importId) : null,
-      importRowId: params.importRowId ? Number(params.importRowId) : null,
+      importRowId,
       options: {
         providerId: settings.generation.providerId,
         provider: settings.generation.provider || 'mock',
         providerName: settings.generation.providerName,
       },
     });
+    if (importRowId) {
+      await this.importRowEntity.update(importRowId, {
+        status: 'prompt_generating',
+        batchId: batch.id,
+        batchNo: batch.batchNo,
+        error: null,
+      });
+    }
 
     try {
-      // 一次性让提示词模型返回指定数量的差异化 Prompt，再拆成图片任务项。
-      const prompts = await this.podPromptModelService.generate(topic, count);
-      const promptSource = this.podPromptModelService.getPromptSource(settings);
-      const used = new Set<string>();
-      await this.itemEntity.save(
-        prompts.map((item, index) => {
-          const seoFileName = this.uniqueSeoFileName(
-            item.seoFileName,
-            used,
-            index
-          );
-          return {
-            itemNo: String(index + 1).padStart(3, '0'),
-            batchId: batch.id,
-            subTheme: item.subTheme,
-            promptSource,
-            promptStatus: autoRun ? 'approved' : 'draft',
-            prompt: item.prompt,
-            seoFileName,
-            seoTitle: item.seoTitle || '',
-            tags: (item.tags || []).join(','),
-            status: 'pending',
-            attempts: 0,
-          };
-        })
-      );
-
-      await this.refreshBatchStats(batch.id);
+      await this.createPromptItemsForBatch(batch, topic, count, autoRun, settings);
       if (autoRun) {
-        // 自动生图不阻塞创建接口：先返回批次，再由后台继续消化图片任务。
+        // 自动生图默认不阻塞创建接口；导入任务可要求串行等待当前批次结束。
         await this.batchEntity.update(batch.id, { status: 'image_generating' });
+        if (importRowId) {
+          await this.importRowEntity.update(importRowId, {
+            status: 'image_generating',
+            batchId: batch.id,
+            batchNo: batch.batchNo,
+            error: null,
+          });
+        }
         await this.writeArtifacts(batch.id);
+        if (params.runInline === true) {
+          return this.runBatch(batch.id);
+        }
         this.runBatchInBackground(batch.id);
         return this.infoWithItems(batch.id);
       }
 
       // 关闭自动生图时，保持原有人工审批流程。
       await this.batchEntity.update(batch.id, { status: 'prompt_ready' });
+      if (importRowId) {
+        await this.importRowEntity.update(importRowId, {
+          status: 'created',
+          batchId: batch.id,
+          batchNo: batch.batchNo,
+          error: null,
+        });
+      }
       await this.writeArtifacts(batch.id);
       return this.infoWithItems(batch.id);
     } catch (err) {
@@ -195,7 +226,7 @@ export class PodGenerationService extends BaseService {
   }
 
   async createBatches(params: any = {}) {
-    // Excel 导入入口：先记录一次导入任务，再让每一行创建一个独立批次。
+    // Excel 导入入口：先把原始行完整入库，再由后台导入任务按行号串行创建批次和生图。
     let rows = [];
     if (Array.isArray(params.rows)) {
       rows = params.rows;
@@ -209,18 +240,20 @@ export class PodGenerationService extends BaseService {
     const importRecord = await this.importEntity.save({
       importNo: this.createImportNo(),
       fileName: String(params.fileName || params.filename || '').slice(0, 220),
-      status: 'processing',
+      status: 'pending',
       totalRows: rows.length,
       successRows: 0,
       failedRows: 0,
       totalImages: 0,
       options: {
-        autoRun: params.autoRun !== false,
+        autoRun: true,
         retries: params.retries,
         timeoutMs: params.timeoutMs,
       },
     });
     const results = [];
+    let queued = 0;
+    let totalImages = 0;
     for (let index = 0; index < rows.length; index++) {
       const row = rows[index] || {};
       const topic = this.pickText(row, ['topic', '主题', '生成主题', '题目']);
@@ -262,76 +295,80 @@ export class PodGenerationService extends BaseService {
         results.push(result);
         continue;
       }
-
-      try {
-        const batch = await this.createBatch({
-          topic,
-          count,
-          retries: retries ?? params.retries,
-          timeoutMs: params.timeoutMs,
-          autoRun: params.autoRun !== false,
-          importId: importRecord.id,
-          importRowId: importRow.id,
-        });
-        const result = {
-          rowNo,
-          topic,
-          count,
-          status: 'success',
-          batchId: batch.id,
-          batchNo: batch.batchNo,
-        };
-        await this.importRowEntity.update(importRow.id, {
-          status: 'created',
-          batchId: batch.id,
-          batchNo: batch.batchNo,
-        });
-        results.push(result);
-      } catch (err) {
-        const result = {
-          rowNo,
-          topic,
-          count,
-          status: 'failed',
-          error: this.formatDbError(err),
-          batchId: err.podBatchId || null,
-          batchNo: err.podBatchNo || null,
-        };
-        await this.importRowEntity.update(importRow.id, {
-          status: 'failed',
-          batchId: result.batchId,
-          batchNo: result.batchNo,
-          error: result.error,
-        });
-        results.push(result);
-      }
+      queued++;
+      totalImages += count;
+      results.push({
+        rowNo,
+        topic,
+        count,
+        status: 'pending',
+      });
     }
 
-    const success = results.filter(item => item.status === 'success').length;
-    const failed = results.length - success;
-    const totalImages = results.reduce(
-      (sum, item: any) =>
-        sum + (item.status === 'success' ? Number(item.count || 0) : 0),
-      0
-    );
-    const status =
-      failed === 0 ? 'completed' : success > 0 ? 'partial_failed' : 'failed';
+    const failed = results.filter(item => item.status === 'failed').length;
+    const status = queued > 0 ? 'pending' : 'failed';
     await this.importEntity.update(importRecord.id, {
       status,
-      successRows: success,
+      successRows: 0,
       failedRows: failed,
       totalImages,
-      error: failed ? `${failed} 行导入失败` : null,
+      error:
+        failed && !queued
+          ? `${failed} 行导入失败`
+          : failed
+          ? `${failed} 行格式校验失败，其余行已进入队列`
+          : null,
     });
+    if (queued > 0) {
+      this.runImportInBackground(importRecord.id);
+    }
     return {
       importId: importRecord.id,
       importNo: importRecord.importNo,
       total: results.length,
-      success,
+      success: queued,
       failed,
+      queued,
       totalImages,
       results,
     };
+  }
+
+  private async createPromptItemsForBatch(
+    batch: PodGenerationBatchEntity,
+    topic: string,
+    count: number,
+    autoRun: boolean,
+    settings: any
+  ) {
+    // 一次性让提示词模型返回指定数量的差异化 Prompt，再拆成图片任务项。
+    const prompts = await this.podPromptModelService.generate(topic, count);
+    const promptSource = this.podPromptModelService.getPromptSource(settings);
+    const used = new Set<string>();
+    await this.itemEntity.save(
+      prompts.map((item, index) => {
+        const seoFileName = this.uniqueSeoFileName(
+          item.seoFileName,
+          used,
+          index
+        );
+        return {
+          itemNo: String(index + 1).padStart(3, '0'),
+          batchId: batch.id,
+          subTheme: item.subTheme,
+          promptSource,
+          promptStatus: autoRun ? 'approved' : 'draft',
+          prompt: item.prompt,
+          seoFileName,
+          seoTitle: item.seoTitle || '',
+          tags: (item.tags || []).join(','),
+          status: 'pending',
+          attempts: 0,
+        };
+      })
+    );
+
+    await this.refreshBatchStats(batch.id);
   }
 
   async retryImportRow(id: number) {
@@ -349,29 +386,13 @@ export class PodGenerationService extends BaseService {
       throw new CoolCommException('导入行数量无效，无法重试创建批次');
     }
 
-    const record = await this.importEntity.findOneBy({ id: row.importId });
-    const options = record?.options || {};
     await this.importRowEntity.update(row.id, {
       status: 'pending',
       error: null,
     });
 
     try {
-      const batch = await this.createBatch({
-        topic: row.topic,
-        count: row.count,
-        retries: options.retries,
-        timeoutMs: options.timeoutMs,
-        autoRun: options.autoRun !== false,
-        importId: row.importId,
-        importRowId: row.id,
-      });
-      await this.importRowEntity.update(row.id, {
-        status: 'created',
-        batchId: batch.id,
-        batchNo: batch.batchNo,
-        error: null,
-      });
+      await this.processImportRow(row.id);
     } catch (err) {
       await this.importRowEntity.update(row.id, {
         status: 'failed',
@@ -395,8 +416,7 @@ export class PodGenerationService extends BaseService {
     if (!row.batchId) {
       return this.retryImportRow(row.id);
     }
-    await this.repairBatchFailures(row.batchId);
-    return this.importRowEntity.findOneBy({ id: row.id });
+    return this.processImportRowBatch(row, row.batchId);
   }
 
   async repairImport(id: number) {
@@ -413,11 +433,19 @@ export class PodGenerationService extends BaseService {
     for (const row of rows) {
       try {
         if (row.batchId) {
-          await this.repairBatchFailures(row.batchId);
-          results.push({ rowId: row.id, rowNo: row.rowNo, status: 'repaired' });
-        } else if (row.status === 'failed') {
-          await this.retryImportRow(row.id);
-          results.push({ rowId: row.id, rowNo: row.rowNo, status: 'created' });
+          const updated = await this.processImportRowBatch(row, row.batchId);
+          results.push({
+            rowId: row.id,
+            rowNo: row.rowNo,
+            status: updated?.status === 'completed' ? 'repaired' : 'failed',
+          });
+        } else if (row.status === 'failed' || row.status === 'pending') {
+          const updated = await this.retryImportRow(row.id);
+          results.push({
+            rowId: row.id,
+            rowNo: row.rowNo,
+            status: updated?.status || 'completed',
+          });
         }
       } catch (err) {
         results.push({
@@ -433,6 +461,299 @@ export class PodGenerationService extends BaseService {
       importId,
       results,
     };
+  }
+
+  async runImport(
+    id: number,
+    options: { staleMinutes?: number; preAcquired?: boolean } = {}
+  ) {
+    const importId = Number(id);
+    if (!importId) {
+      throw new CoolCommException('导入记录ID无效');
+    }
+    if (this.runningImportIds.has(importId)) {
+      throw new CoolCommException('当前导入任务正在执行中，请勿重复执行');
+    }
+
+    this.runningImportIds.add(importId);
+    try {
+      const acquired =
+        options.preAcquired === true ||
+        (await this.acquireImportRun(importId, Number(options.staleMinutes ?? 30)));
+      if (!acquired) {
+        throw new ImportRunNotAcquiredError();
+      }
+
+      const rows = await this.importRowEntity.find({
+        where: { importId },
+        order: { rowNo: 'ASC', id: 'ASC' },
+      });
+      for (const row of rows) {
+        if (row.status === 'failed' || row.status === 'completed') {
+          continue;
+        }
+        if (
+          ![
+            'pending',
+            'creating_batch',
+            'prompt_generating',
+            'image_generating',
+            'post_processing',
+            'verifying',
+          ].includes(row.status)
+        ) {
+          continue;
+        }
+        try {
+          const updated = await this.processImportRow(row.id);
+          if (updated?.status === 'image_generating') {
+            break;
+          }
+        } catch (err) {
+          console.error(
+            `[POD_IMPORT_ROW_FAILED] import=${importId} row=${row.id} rowNo=${row.rowNo} error=${this.formatDbError(err)}`
+          );
+        }
+      }
+      await this.refreshImportStats(importId);
+      return this.importEntity.findOneBy({ id: importId });
+    } finally {
+      this.runningImportIds.delete(importId);
+    }
+  }
+
+  async recoverImportTasks(options: { staleMinutes?: number; limit?: number } = {}) {
+    const staleMinutes = Number(options.staleMinutes ?? 30);
+    const limit = this.clamp(Number(options.limit || 5), 1, 50);
+    const cutoff = moment()
+      .subtract(Math.max(staleMinutes, 0), 'minutes')
+      .format('YYYY-MM-DD HH:mm:ss');
+    const records = await this.importEntity
+      .createQueryBuilder('a')
+      .where(
+        '(a.status = :pending or (a.status = :running and a.updateTime <= :cutoff))',
+        {
+          pending: 'pending',
+          running: 'running',
+          cutoff,
+        }
+      )
+      .orderBy('a.id', 'ASC')
+      .limit(limit)
+      .getMany();
+
+    let acquiredCount = 0;
+    for (const record of records) {
+      if (this.runningImportIds.has(record.id)) {
+        continue;
+      }
+      const acquired = await this.acquireImportRun(record.id, staleMinutes);
+      if (!acquired) {
+        continue;
+      }
+      acquiredCount += 1;
+      this.runImportInBackground(record.id, staleMinutes, true);
+    }
+    return acquiredCount;
+  }
+
+  private async acquireImportRun(importId: number, staleMinutes = 30) {
+    const cutoff = moment()
+      .subtract(Math.max(staleMinutes, 0), 'minutes')
+      .format('YYYY-MM-DD HH:mm:ss');
+    const result = await this.importEntity
+      .createQueryBuilder()
+      .update(PodGenerationImportEntity)
+      .set({
+        status: 'running',
+        error: null,
+        updateTime: moment().format('YYYY-MM-DD HH:mm:ss') as any,
+      })
+      .where('id = :importId', { importId })
+      .andWhere(
+        '(status = :pending or (status = :running and updateTime <= :cutoff))',
+        {
+          pending: 'pending',
+          running: 'running',
+          cutoff,
+        }
+      )
+      .execute();
+    return Number(result.affected || 0) > 0;
+  }
+
+  private runImportInBackground(
+    id: number,
+    staleMinutes = 30,
+    preAcquired = false
+  ) {
+    setImmediate(() => {
+      if (this.runningImportIds.has(id)) {
+        console.warn(`[POD_IMPORT_SKIP] import=${id} reason=already-running`);
+        return;
+      }
+      this.runImport(id, { staleMinutes, preAcquired }).catch(async err => {
+        if (err instanceof ImportRunNotAcquiredError) {
+          console.warn(
+            `[POD_IMPORT_SKIP] import=${id} reason=not-acquired message=${err.message}`
+          );
+          return;
+        }
+        await this.importEntity.update(id, {
+          status: 'failed',
+          error: this.formatDbError(err),
+        });
+        console.error(
+          `[POD_IMPORT_FAILED] import=${id} error=${this.formatDbError(err)}`
+        );
+      });
+    });
+  }
+
+  private async processImportRow(id: number) {
+    const row = await this.importRowEntity.findOneBy({ id: Number(id) });
+    if (!row) {
+      throw new CoolCommException('导入行不存在');
+    }
+    if (row.batchId) {
+      return this.processImportRowBatch(row, row.batchId);
+    }
+    if (!row.topic) {
+      throw new CoolCommException('导入行主题为空，无法处理');
+    }
+    if (!row.count || row.count < 1) {
+      throw new CoolCommException('导入行数量无效，无法处理');
+    }
+
+    const existingBatch = await this.batchEntity.findOne({
+      where: { importRowId: row.id },
+      order: { id: 'DESC' },
+    });
+    if (existingBatch) {
+      await this.importRowEntity.update(row.id, {
+        batchId: existingBatch.id,
+        batchNo: existingBatch.batchNo,
+      });
+      return this.processImportRowBatch(row, existingBatch.id);
+    }
+
+    const record = await this.importEntity.findOneBy({ id: row.importId });
+    const options = record?.options || {};
+    await this.importRowEntity.update(row.id, {
+      status: 'creating_batch',
+      error: null,
+    });
+
+    try {
+      const batch = await this.createBatch({
+        topic: row.topic,
+        count: row.count,
+        retries: options.retries,
+        timeoutMs: options.timeoutMs,
+        autoRun: true,
+        runInline: true,
+        importId: row.importId,
+        importRowId: row.id,
+      });
+      await this.importRowEntity.update(row.id, {
+        status: this.isBatchTerminalSuccess(batch.status)
+          ? 'completed'
+          : 'failed',
+        batchId: batch.id,
+        batchNo: batch.batchNo,
+        error: this.isBatchTerminalSuccess(batch.status)
+          ? null
+          : batch.error || `批次状态：${batch.status}`,
+      });
+    } catch (err) {
+      await this.importRowEntity.update(row.id, {
+        status: 'failed',
+        batchId: err.podBatchId || null,
+        batchNo: err.podBatchNo || null,
+        error: this.formatDbError(err),
+      });
+      throw err;
+    } finally {
+      await this.refreshImportStats(row.importId);
+    }
+
+    return this.importRowEntity.findOneBy({ id: row.id });
+  }
+
+  private async processImportRowBatch(
+    row: PodGenerationImportRowEntity,
+    batchId: number
+  ) {
+    const batch = await this.ensureBatch(batchId);
+    const activeCount = await this.countActiveItems(batch.id);
+    if (activeCount > 0 || this.runningBatchIds.has(batch.id)) {
+      await this.importRowEntity.update(row.id, {
+        status: 'image_generating',
+        batchId: batch.id,
+        batchNo: batch.batchNo,
+        error: null,
+      });
+      await this.refreshImportStats(row.importId);
+      return this.importRowEntity.findOneBy({ id: row.id });
+    }
+
+    const promptCount = await this.itemEntity.countBy({ batchId: batch.id });
+    if (!promptCount) {
+      // 这是批次已创建但提示词尚未落库时的恢复路径；沿用批次初始配置，避免恢复时切换供应商或输出目录。
+      await this.importRowEntity.update(row.id, {
+        status: 'prompt_generating',
+        batchId: batch.id,
+        batchNo: batch.batchNo,
+        error: null,
+      });
+      await this.batchEntity.update(batch.id, {
+        status: 'prompt_generating',
+        error: null,
+      });
+      const settings = await this.podSettingService.getSettings();
+      await this.createPromptItemsForBatch(
+        batch,
+        batch.topic,
+        batch.count,
+        true,
+        settings
+      );
+      await this.batchEntity.update(batch.id, { status: 'image_generating' });
+      const result = await this.runBatch(batch.id);
+      return this.finishImportRowFromBatch(row, result);
+    }
+
+    if (this.isBatchTerminalSuccess(batch.status)) {
+      return this.finishImportRowFromBatch(row, batch);
+    }
+
+    const pendingApproved = await this.itemEntity.countBy({
+      batchId: batch.id,
+      status: 'pending',
+      promptStatus: 'approved',
+    });
+    const result = pendingApproved
+      ? await this.runBatch(batch.id)
+      : await this.repairBatchFailures(batch.id);
+    return this.finishImportRowFromBatch(row, result);
+  }
+
+  private async finishImportRowFromBatch(
+    row: PodGenerationImportRowEntity,
+    batch: any
+  ) {
+    await this.importRowEntity.update(row.id, {
+      status: this.isBatchTerminalSuccess(batch.status)
+        ? 'completed'
+        : 'failed',
+      batchId: batch.id,
+      batchNo: batch.batchNo,
+      error: this.isBatchTerminalSuccess(batch.status)
+        ? null
+        : batch.error || `批次状态：${batch.status}`,
+    });
+    await this.refreshImportStats(row.importId);
+    return this.importRowEntity.findOneBy({ id: row.id });
   }
 
   async exportBatches(params: any = {}) {
@@ -1829,24 +2150,43 @@ export class PodGenerationService extends BaseService {
     return `${moment().format('YYYYMMDD-HHmmss')}-${uuidv4().slice(0, 6)}`;
   }
 
+  private isBatchTerminalSuccess(status: string) {
+    return status === 'completed';
+  }
+
   private async refreshImportStats(importId: number) {
     const rows = await this.importRowEntity.find({ where: { importId } });
     if (!rows.length) {
       return;
     }
-    const successRows = rows.filter(row => row.status === 'created').length;
+    const successRows = rows.filter(row =>
+      ['completed', 'created'].includes(row.status)
+    ).length;
     const failedRows = rows.filter(row => row.status === 'failed').length;
+    const activeRows = rows.filter(row =>
+      [
+        'pending',
+        'creating_batch',
+        'prompt_generating',
+        'image_generating',
+        'post_processing',
+        'verifying',
+      ].includes(row.status)
+    ).length;
     const totalImages = rows.reduce(
       (sum, row) =>
-        sum + (row.status === 'created' ? Number(row.count || 0) : 0),
+        sum + (row.topic && row.count > 0 ? Number(row.count || 0) : 0),
       0
     );
-    const status =
-      failedRows === 0
-        ? 'completed'
-        : successRows > 0
-        ? 'partial_failed'
-        : 'failed';
+    let status = 'running';
+    if (!activeRows) {
+      status =
+        failedRows === 0
+          ? 'completed'
+          : successRows > 0
+          ? 'partial_failed'
+          : 'failed';
+    }
     await this.importEntity.update(importId, {
       totalRows: rows.length,
       successRows,

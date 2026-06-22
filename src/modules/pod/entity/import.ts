@@ -17,9 +17,9 @@ export class PodGenerationImportEntity extends BaseEntity {
 
   @Index()
   @Column({
-    comment: '状态 processing/completed/partial_failed/failed',
+    comment: '状态 pending/running/completed/partial_failed/failed',
     length: 30,
-    default: 'processing',
+    default: 'pending',
   })
   status: string;
 

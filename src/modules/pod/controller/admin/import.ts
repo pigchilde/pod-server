@@ -62,6 +62,11 @@ export class AdminPodGenerationImportController extends BaseController {
     );
   }
 
+  @Post('/runImport', { summary: '继续执行导入记录' })
+  async runImport(@Body('id') id: number) {
+    return this.ok(await this.podGenerationService.runImport(this.parseId(id)));
+  }
+
   private parseId(id: number) {
     const value = Number(id);
     if (!value || !Number.isFinite(value)) {

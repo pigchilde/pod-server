@@ -85,7 +85,7 @@
           {
             "name": "修复",
             "router": null,
-            "perms": "pod:import:retryRow,pod:import:repairRow,pod:import:repairImport",
+            "perms": "pod:import:retryRow,pod:import:repairRow,pod:import:repairImport,pod:import:runImport",
             "type": 2,
             "icon": null,
             "orderNum": 2,
