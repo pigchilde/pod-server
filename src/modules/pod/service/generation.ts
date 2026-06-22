@@ -342,31 +342,55 @@ export class PodGenerationService extends BaseService {
     settings: any
   ) {
     // 一次性让提示词模型返回指定数量的差异化 Prompt，再拆成图片任务项。
+    // 注意：导入任务恢复、服务热重载或多实例同时处理同一导入行时，可能在
+    // “批次已创建、提示词尚未落库”的窗口重复进入这里。先做一次快速幂等检查，
+    // 生成模型返回后再用批次行锁做最终检查，避免同一批次反复追加 001-005。
+    const existingCount = await this.itemEntity.countBy({ batchId: batch.id });
+    if (existingCount > 0) {
+      await this.refreshBatchStats(batch.id);
+      return;
+    }
+
     const prompts = await this.podPromptModelService.generate(topic, count);
     const promptSource = this.podPromptModelService.getPromptSource(settings);
     const used = new Set<string>();
-    await this.itemEntity.save(
-      prompts.map((item, index) => {
-        const seoFileName = this.uniqueSeoFileName(
-          item.seoFileName,
-          used,
-          index
-        );
-        return {
-          itemNo: String(index + 1).padStart(3, '0'),
-          batchId: batch.id,
-          subTheme: item.subTheme,
-          promptSource,
-          promptStatus: autoRun ? 'approved' : 'draft',
-          prompt: item.prompt,
-          seoFileName,
-          seoTitle: item.seoTitle || '',
-          tags: (item.tags || []).join(','),
-          status: 'pending',
-          attempts: 0,
-        };
-      })
-    );
+
+    await this.batchEntity.manager.transaction(async manager => {
+      await manager.findOne(PodGenerationBatchEntity, {
+        where: { id: batch.id },
+        lock: { mode: 'pessimistic_write' },
+      });
+      const lockedExistingCount = await manager.count(PodGenerationItemEntity, {
+        where: { batchId: batch.id },
+      });
+      if (lockedExistingCount > 0) {
+        return;
+      }
+
+      await manager.save(
+        PodGenerationItemEntity,
+        prompts.map((item, index) => {
+          const seoFileName = this.uniqueSeoFileName(
+            item.seoFileName,
+            used,
+            index
+          );
+          return {
+            itemNo: String(index + 1).padStart(3, '0'),
+            batchId: batch.id,
+            subTheme: item.subTheme,
+            promptSource,
+            promptStatus: autoRun ? 'approved' : 'draft',
+            prompt: item.prompt,
+            seoFileName,
+            seoTitle: item.seoTitle || '',
+            tags: (item.tags || []).join(','),
+            status: 'pending',
+            attempts: 0,
+          };
+        })
+      );
+    });
 
     await this.refreshBatchStats(batch.id);
   }
@@ -506,7 +530,11 @@ export class PodGenerationService extends BaseService {
         }
         try {
           const updated = await this.processImportRow(row.id);
-          if (updated?.status === 'image_generating') {
+          if (
+            ['prompt_generating', 'image_generating'].includes(
+              updated?.status
+            )
+          ) {
             break;
           }
         } catch (err) {
@@ -528,19 +556,16 @@ export class PodGenerationService extends BaseService {
     const cutoff = moment()
       .subtract(Math.max(staleMinutes, 0), 'minutes')
       .format('YYYY-MM-DD HH:mm:ss');
-    const records = await this.importEntity
+    const find = this.importEntity
       .createQueryBuilder('a')
-      .where(
-        '(a.status = :pending or (a.status = :running and a.updateTime <= :cutoff))',
-        {
-          pending: 'pending',
-          running: 'running',
-          cutoff,
-        }
-      )
-      .orderBy('a.id', 'ASC')
-      .limit(limit)
-      .getMany();
+      .where('a.status = :pending', { pending: 'pending' });
+    if (staleMinutes > 0) {
+      find.orWhere('(a.status = :running and a.updateTime <= :cutoff)', {
+        running: 'running',
+        cutoff,
+      });
+    }
+    const records = await find.orderBy('a.id', 'ASC').limit(limit).getMany();
 
     let acquiredCount = 0;
     for (const record of records) {
@@ -561,7 +586,7 @@ export class PodGenerationService extends BaseService {
     const cutoff = moment()
       .subtract(Math.max(staleMinutes, 0), 'minutes')
       .format('YYYY-MM-DD HH:mm:ss');
-    const result = await this.importEntity
+    const find = this.importEntity
       .createQueryBuilder()
       .update(PodGenerationImportEntity)
       .set({
@@ -569,16 +594,20 @@ export class PodGenerationService extends BaseService {
         error: null,
         updateTime: moment().format('YYYY-MM-DD HH:mm:ss') as any,
       })
-      .where('id = :importId', { importId })
-      .andWhere(
+      .where('id = :importId', { importId });
+    if (staleMinutes > 0) {
+      find.andWhere(
         '(status = :pending or (status = :running and updateTime <= :cutoff))',
         {
           pending: 'pending',
           running: 'running',
           cutoff,
         }
-      )
-      .execute();
+      );
+    } else {
+      find.andWhere('status = :pending', { pending: 'pending' });
+    }
+    const result = await find.execute();
     return Number(result.affected || 0) > 0;
   }
 
@@ -699,26 +728,50 @@ export class PodGenerationService extends BaseService {
 
     const promptCount = await this.itemEntity.countBy({ batchId: batch.id });
     if (!promptCount) {
+      if (batch.status === 'prompt_generating') {
+        await this.importRowEntity.update(row.id, {
+          status: 'prompt_generating',
+          batchId: batch.id,
+          batchNo: batch.batchNo,
+          error: null,
+        });
+        await this.refreshImportStats(row.importId);
+        return this.importRowEntity.findOneBy({ id: row.id });
+      }
+      if (!this.acquireBatchLock(batch.id)) {
+        await this.importRowEntity.update(row.id, {
+          status: 'prompt_generating',
+          batchId: batch.id,
+          batchNo: batch.batchNo,
+          error: null,
+        });
+        await this.refreshImportStats(row.importId);
+        return this.importRowEntity.findOneBy({ id: row.id });
+      }
       // 这是批次已创建但提示词尚未落库时的恢复路径；沿用批次初始配置，避免恢复时切换供应商或输出目录。
-      await this.importRowEntity.update(row.id, {
-        status: 'prompt_generating',
-        batchId: batch.id,
-        batchNo: batch.batchNo,
-        error: null,
-      });
-      await this.batchEntity.update(batch.id, {
-        status: 'prompt_generating',
-        error: null,
-      });
-      const settings = await this.podSettingService.getSettings();
-      await this.createPromptItemsForBatch(
-        batch,
-        batch.topic,
-        batch.count,
-        true,
-        settings
-      );
-      await this.batchEntity.update(batch.id, { status: 'image_generating' });
+      try {
+        await this.importRowEntity.update(row.id, {
+          status: 'prompt_generating',
+          batchId: batch.id,
+          batchNo: batch.batchNo,
+          error: null,
+        });
+        await this.batchEntity.update(batch.id, {
+          status: 'prompt_generating',
+          error: null,
+        });
+        const settings = await this.podSettingService.getSettings();
+        await this.createPromptItemsForBatch(
+          batch,
+          batch.topic,
+          batch.count,
+          true,
+          settings
+        );
+        await this.batchEntity.update(batch.id, { status: 'image_generating' });
+      } finally {
+        this.releaseBatchLock(batch.id);
+      }
       const result = await this.runBatch(batch.id);
       return this.finishImportRowFromBatch(row, result);
     }
