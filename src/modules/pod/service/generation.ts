@@ -234,7 +234,8 @@ export class PodGenerationService extends BaseService {
   }
 
   async createBatches(params: any = {}) {
-    // Excel 导入入口：先把原始行完整入库，再由后台导入任务按行号串行创建批次和生图。
+    // Excel 导入入口：先把原始行完整入库，再由后台任务快速投递批次；
+    // 批次生图通过后台异步执行和全局生图槽位推进，避免导入行按完整批次串行等待。
     let rows = [];
     if (Array.isArray(params.rows)) {
       rows = params.rows;
@@ -257,6 +258,7 @@ export class PodGenerationService extends BaseService {
         autoRun: true,
         retries: params.retries,
         timeoutMs: params.timeoutMs,
+        promptConcurrency: params.promptConcurrency,
       },
     });
     const results = [];
@@ -359,7 +361,32 @@ export class PodGenerationService extends BaseService {
       return;
     }
 
-    const prompts = await this.podPromptModelService.generate(topic, count);
+    const promptStartedAt = Date.now();
+    let prompts: any[];
+    try {
+      prompts = await this.podPromptModelService.generate(topic, count);
+      console.info(
+        [
+          '[POD_PROMPT_STAGE]',
+          `batch=${batch.id}/${batch.batchNo}`,
+          `count=${count}`,
+          `cost=${Date.now() - promptStartedAt}ms`,
+          'status=success',
+        ].join(' ')
+      );
+    } catch (err) {
+      console.error(
+        [
+          '[POD_PROMPT_STAGE]',
+          `batch=${batch.id}/${batch.batchNo}`,
+          `count=${count}`,
+          `cost=${Date.now() - promptStartedAt}ms`,
+          'status=failed',
+          `msg="${this.compactLogText(err?.message || err, 160)}"`,
+        ].join(' ')
+      );
+      throw err;
+    }
     const promptSource = this.podPromptModelService.getPromptSource(settings);
     const used = new Set<string>();
 
@@ -516,41 +543,42 @@ export class PodGenerationService extends BaseService {
         throw new ImportRunNotAcquiredError();
       }
 
+      const record = await this.importEntity.findOneBy({ id: importId });
+      const promptConcurrency = this.clamp(
+        Number(
+          record?.options?.promptConcurrency ||
+            process.env.POD_IMPORT_PROMPT_CONCURRENCY ||
+            3
+        ),
+        1,
+        5
+      );
       const rows = await this.importRowEntity.find({
         where: { importId },
         order: { rowNo: 'ASC', id: 'ASC' },
       });
-      for (const row of rows) {
+      const runnableRows = rows.filter(row => {
         if (row.status === 'failed' || row.status === 'completed') {
-          continue;
+          return false;
         }
-        if (
-          ![
+        return [
             'pending',
             'creating_batch',
             'prompt_generating',
             'image_generating',
             'post_processing',
             'verifying',
-          ].includes(row.status)
-        ) {
-          continue;
-        }
+          ].includes(row.status);
+      });
+      await this.runPool(runnableRows, promptConcurrency, async row => {
         try {
-          const updated = await this.processImportRow(row.id);
-          if (
-            ['prompt_generating', 'image_generating'].includes(
-              updated?.status
-            )
-          ) {
-            break;
-          }
+          await this.processImportRow(row.id);
         } catch (err) {
           console.error(
             `[POD_IMPORT_ROW_FAILED] import=${importId} row=${row.id} rowNo=${row.rowNo} error=${this.formatDbError(err)}`
           );
         }
-      }
+      });
       await this.refreshImportStats(importId);
       return this.importEntity.findOneBy({ id: importId });
     } finally {
@@ -688,19 +716,15 @@ export class PodGenerationService extends BaseService {
         retries: options.retries,
         timeoutMs: options.timeoutMs,
         autoRun: true,
-        runInline: true,
+        runInline: false,
         importId: row.importId,
         importRowId: row.id,
       });
       await this.importRowEntity.update(row.id, {
-        status: this.isBatchTerminalSuccess(batch.status)
-          ? 'completed'
-          : 'failed',
+        status: this.resolveImportRowStatusForQueuedBatch(batch.status),
         batchId: batch.id,
         batchNo: batch.batchNo,
-        error: this.isBatchTerminalSuccess(batch.status)
-          ? null
-          : batch.error || `批次状态：${batch.status}`,
+        error: batch.error || null,
       });
     } catch (err) {
       await this.importRowEntity.update(row.id, {
@@ -817,6 +841,22 @@ export class PodGenerationService extends BaseService {
     return this.importRowEntity.findOneBy({ id: row.id });
   }
 
+  private resolveImportRowStatusForQueuedBatch(status: string) {
+    if (status === 'completed') {
+      return 'completed';
+    }
+    if (status === 'partial_failed') {
+      return 'completed';
+    }
+    if (status === 'failed') {
+      return 'failed';
+    }
+    if (status === 'prompt_generating' || status === 'prompt_ready') {
+      return 'prompt_generating';
+    }
+    return 'image_generating';
+  }
+
   async exportBatches(params: any = {}) {
     // 导出数据按批次创建时间筛选，主表返回批次，附表返回批次下的标题和 Prompt。
     const find = this.batchEntity.createQueryBuilder('a');
@@ -886,13 +926,50 @@ export class PodGenerationService extends BaseService {
         console.warn(`[POD_BATCH_SKIP] batch=${id} reason=already-running`);
         return;
       }
-      this.runBatch(id).catch(async err => {
-        await this.batchEntity.update(id, {
-          status: 'failed',
-          error: this.formatDbError(err),
+      console.info(`[POD_BATCH_ASYNC_START] batch=${id}`);
+      this.runBatch(id)
+        .catch(async err => {
+          await this.batchEntity.update(id, {
+            status: 'failed',
+            error: this.formatDbError(err),
+          });
+          console.error(
+            `[POD_BATCH_ASYNC_FAILED] batch=${id} error=${this.formatDbError(err)}`
+          );
+        })
+        .finally(async () => {
+          await this.syncImportRowAfterBatch(id);
         });
-      });
     });
+  }
+
+  private async syncImportRowAfterBatch(batchId: number) {
+    try {
+      const batch = await this.batchEntity.findOneBy({ id: batchId });
+      if (!batch?.importRowId || !batch.importId) {
+        return;
+      }
+      const row = await this.importRowEntity.findOneBy({
+        id: batch.importRowId,
+      });
+      if (!row) {
+        return;
+      }
+      await this.finishImportRowFromBatch(row, await this.infoWithItems(batch.id));
+      const updatedRow = await this.importRowEntity.findOneBy({ id: row.id });
+      console.info(
+        `[POD_IMPORT_ROW_SYNC] import=${batch.importId} row=${batch.importRowId} batch=${batch.id} batchStatus=${batch.status} rowStatus=${updatedRow?.status || '-'}`
+      );
+    } catch (err) {
+      const batch = await this.batchEntity.findOneBy({ id: batchId });
+      const rowStatus = batch?.importRowId
+        ? (await this.importRowEntity.findOneBy({ id: batch.importRowId }))
+            ?.status
+        : '';
+      console.warn(
+        `[POD_IMPORT_ROW_SYNC_FAIL] batch=${batchId} rowStatus=${rowStatus || '-'} error=${this.formatDbError(err)}`
+      );
+    }
   }
 
   async retryFailed(id: number) {
@@ -1345,6 +1422,7 @@ export class PodGenerationService extends BaseService {
     }
 
     try {
+      const imageStageStartedAt = Date.now();
       const imageDir = path.join(batch.outputDir, 'images');
       const publicDir = path.posix.join(
         this.getBatchPublicDir(batch),
@@ -1387,19 +1465,25 @@ export class PodGenerationService extends BaseService {
             },
           })
       );
+      const imageStageMs = Date.now() - imageStageStartedAt;
       const { postProcessError, ...imageResult } = result;
       let mockupResult = {};
       let error = postProcessError || null;
       let mockupStatus = 'pending';
       let mockupError = null;
       let mockupAttempts = Number(item.mockupAttempts || 0);
+      let mockupMs = 0;
+      let mockupStartedAt = 0;
       if (!postProcessError) {
         try {
           // 只有抠图成功后才自动合成效果图，避免把带背景的原图贴到 T 恤模板上。
+          mockupStartedAt = Date.now();
           mockupAttempts += 1;
           mockupResult = await this.generateMockupResult(batch, imageResult);
+          mockupMs = Date.now() - mockupStartedAt;
           mockupStatus = 'success';
         } catch (err) {
+          mockupMs = mockupStartedAt ? Date.now() - mockupStartedAt : 0;
           mockupStatus = 'failed';
           mockupError = this.formatDbError(err, '效果图生成失败：');
           error = mockupError;
@@ -1425,6 +1509,18 @@ export class PodGenerationService extends BaseService {
         error,
         durationMs: Date.now() - startedAt,
       });
+      console.info(
+        [
+          '[POD_ITEM_STAGE]',
+          `batch=${batch.id}/${batch.batchNo}`,
+          `item=${item.id}/${item.itemNo}`,
+          `imageMs=${imageStageMs}`,
+          `mockupMs=${mockupMs}`,
+          `totalMs=${Date.now() - startedAt}`,
+          `cutout=${postProcessError ? 'failed' : settings.cutout?.enabled ? 'success' : 'skipped'}`,
+          `mockup=${mockupStatus}`,
+        ].join(' ')
+      );
     } catch (err) {
       const durationMs = Date.now() - startedAt;
       const imageIndex = Number(item.itemNo || 0) || 0;
@@ -1924,6 +2020,9 @@ export class PodGenerationService extends BaseService {
   }
 
   private async resolveImportRowStatusFromBatch(batch: any) {
+    if (batch.status === 'partial_failed') {
+      return 'completed';
+    }
     if (!this.isBatchTerminalSuccess(batch.status)) {
       return 'failed';
     }
@@ -1934,6 +2033,12 @@ export class PodGenerationService extends BaseService {
   }
 
   private async resolveImportRowErrorFromBatch(batch: any) {
+    if (batch.status === 'partial_failed') {
+      const messages = this.formatPostProcessIssues(
+        await this.getPostProcessStats(batch.id)
+      );
+      return messages.length ? messages.join('；') : batch.error || null;
+    }
     if (!this.isBatchTerminalSuccess(batch.status)) {
       return batch.error || `批次状态：${batch.status}`;
     }
