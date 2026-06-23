@@ -776,7 +776,10 @@ export class PodGenerationService extends BaseService {
       return this.finishImportRowFromBatch(row, result);
     }
 
-    if (this.isBatchTerminalSuccess(batch.status)) {
+    if (
+      this.isBatchTerminalSuccess(batch.status) &&
+      !(await this.hasPostProcessRepairableItems(batch.id))
+    ) {
       return this.finishImportRowFromBatch(row, batch);
     }
 
@@ -1479,20 +1482,40 @@ export class PodGenerationService extends BaseService {
       where: {
         batchId,
         status: 'success',
-        cutoutStatus: 'failed',
       },
       order: { id: 'ASC' },
     });
-    const retryableItems = items.filter(
-      item =>
-        Number(item.cutoutAttempts || 0) < 2 &&
-        item.filePath &&
-        fs.existsSync(item.filePath)
+
+    const cutoutRetryableItems = items.filter(item =>
+      this.isCutoutRepairableItem(item)
     );
-    for (const item of retryableItems) {
+    for (const item of cutoutRetryableItems) {
       await this.retryCutoutOnly(batch, item);
     }
+
     await this.retryMockupFailures(batchId);
+  }
+
+  private async hasPostProcessRepairableItems(batchId: number) {
+    const items = await this.itemEntity.find({
+      where: {
+        batchId,
+        status: 'success',
+      },
+      order: { id: 'ASC' },
+    });
+    return items.some(
+      item =>
+        this.isCutoutRepairableItem(item) || this.isMockupRepairableItem(item)
+    );
+  }
+
+  private isCutoutRepairableItem(item: PodGenerationItemEntity) {
+    return (
+      item.cutoutStatus === 'failed' &&
+      Boolean(item.filePath) &&
+      fs.existsSync(item.filePath)
+    );
   }
 
   private async retryImageFailuresOnce(batch: PodGenerationBatchEntity) {
@@ -1609,15 +1632,11 @@ export class PodGenerationService extends BaseService {
       where: {
         batchId,
         status: 'success',
-        mockupStatus: 'failed',
       },
       order: { id: 'ASC' },
     });
-    const retryableItems = items.filter(
-      item =>
-        Number(item.mockupAttempts || 0) < 2 &&
-        item.filePath &&
-        fs.existsSync(item.filePath)
+    const retryableItems = items.filter(item =>
+      this.isMockupRepairableItem(item)
     );
 
     for (const item of retryableItems) {
@@ -1645,6 +1664,22 @@ export class PodGenerationService extends BaseService {
         });
       }
     }
+  }
+
+  private isMockupRepairableItem(item: PodGenerationItemEntity) {
+    if (!item.filePath || !fs.existsSync(item.filePath)) {
+      return false;
+    }
+    if (item.cutoutStatus === 'failed' || item.cutoutStatus === 'running') {
+      return false;
+    }
+    if (item.mockupStatus === 'failed' || item.mockupStatus === 'pending') {
+      return true;
+    }
+    if (!item.mockupImageUrl || !item.mockupFilePath) {
+      return true;
+    }
+    return !fs.existsSync(item.mockupFilePath);
   }
 
   private async verifyBatchArtifacts(batchId: number) {
