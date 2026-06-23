@@ -1,4 +1,5 @@
-import { CommonSchedule, Inject, Provide, TaskLocal } from '@midwayjs/core';
+import { Inject } from '@midwayjs/core';
+import { Job, IJob } from '@midwayjs/cron';
 import { InjectEntityModel } from '@midwayjs/typeorm';
 import { Repository } from 'typeorm';
 import { ILogger } from '@midwayjs/logger';
@@ -8,8 +9,11 @@ import { PodComfyService } from '../service/comfy';
 /**
  * ComfyUI 显存定时释放
  */
-@Provide()
-export class PodComfySchedule implements CommonSchedule {
+@Job({
+  cronTime: '0 */5 * * * *',
+  start: true,
+})
+export class PodComfySchedule implements IJob {
   @InjectEntityModel(PodGenerationItemEntity)
   itemEntity: Repository<PodGenerationItemEntity>;
 
@@ -19,9 +23,7 @@ export class PodComfySchedule implements CommonSchedule {
   @Inject()
   logger: ILogger;
 
-  // Win 主机 6GB 显存容易被 RMBG 缓存占满；每 5 分钟空闲时释放一次，避免影响正在执行的抠图/生图任务。
-  @TaskLocal('0 */5 * * * *')
-  async exec() {
+  async onTick() {
     const runningCount = await this.itemEntity
       .createQueryBuilder('a')
       .where('(a.status = :status or a.cutoutStatus = :cutoutRunning)', {

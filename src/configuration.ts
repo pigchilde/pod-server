@@ -18,6 +18,9 @@ import * as LocalConfig from './config/config.local';
 import * as ProdConfig from './config/config.prod';
 import * as cool from '@cool-midway/core';
 import * as upload from '@midwayjs/upload';
+import './modules/pod/schedule/import';
+import './modules/pod/schedule/comfy';
+import './modules/pod/schedule/post-process';
 // import * as task from '@cool-midway/task';
 // import * as rpc from '@cool-midway/rpc';
 
