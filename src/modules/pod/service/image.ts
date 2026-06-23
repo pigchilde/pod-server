@@ -15,6 +15,7 @@ export interface PodGenerateImageInput {
   providerImageUrl?: string;
   onProviderImageUrl?: (url: string) => Promise<void>;
   cutoutContext?: PodCutoutContext;
+  skipCutout?: boolean;
 }
 
 export interface PodGenerateImageResult {
@@ -226,13 +227,19 @@ export class PodImageService {
 
     try {
       // 后处理成功时覆盖为透明 PNG；失败时保留模型原图，避免浪费一次生图结果。
-      const cutoutBuffer = await this.removeBackground(
-        buffer,
-        input,
-        ext,
-        settings
-      );
-      outputBuffer = await this.resizeToOutputSize(cutoutBuffer, ext, settings);
+      if (!input.skipCutout) {
+        const cutoutBuffer = await this.removeBackground(
+          buffer,
+          input,
+          ext,
+          settings
+        );
+        outputBuffer = await this.resizeToOutputSize(
+          cutoutBuffer,
+          ext,
+          settings
+        );
+      }
     } catch (err) {
       postProcessError = `抠图失败：${err.message}`;
     }

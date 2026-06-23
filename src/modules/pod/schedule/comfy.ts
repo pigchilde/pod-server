@@ -24,9 +24,13 @@ export class PodComfySchedule implements CommonSchedule {
   async exec() {
     const runningCount = await this.itemEntity
       .createQueryBuilder('a')
-      .where('a.status in (:...statuses)', {
-        statuses: ['running', 'cutout_running'],
-      })
+      .where(
+        '(a.status in (:...statuses) or a.cutoutStatus = :cutoutRunning)',
+        {
+          statuses: ['running', 'cutout_running'],
+          cutoutRunning: 'running',
+        }
+      )
       .getCount();
 
     if (runningCount > 0) {

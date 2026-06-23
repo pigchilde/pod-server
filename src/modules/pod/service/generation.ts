@@ -190,7 +190,13 @@ export class PodGenerationService extends BaseService {
     }
 
     try {
-      await this.createPromptItemsForBatch(batch, topic, count, autoRun, settings);
+      await this.createPromptItemsForBatch(
+        batch,
+        topic,
+        count,
+        autoRun,
+        settings
+      );
       if (autoRun) {
         // 自动生图默认不阻塞创建接口；导入任务可要求串行等待当前批次结束。
         await this.batchEntity.update(batch.id, { status: 'image_generating' });
@@ -538,7 +544,10 @@ export class PodGenerationService extends BaseService {
     try {
       const acquired =
         options.preAcquired === true ||
-        (await this.acquireImportRun(importId, Number(options.staleMinutes ?? 30)));
+        (await this.acquireImportRun(
+          importId,
+          Number(options.staleMinutes ?? 30)
+        ));
       if (!acquired) {
         throw new ImportRunNotAcquiredError();
       }
@@ -562,20 +571,22 @@ export class PodGenerationService extends BaseService {
           return false;
         }
         return [
-            'pending',
-            'creating_batch',
-            'prompt_generating',
-            'image_generating',
-            'post_processing',
-            'verifying',
-          ].includes(row.status);
+          'pending',
+          'creating_batch',
+          'prompt_generating',
+          'image_generating',
+          'post_processing',
+          'verifying',
+        ].includes(row.status);
       });
       await this.runPool(runnableRows, promptConcurrency, async row => {
         try {
           await this.processImportRow(row.id);
         } catch (err) {
           console.error(
-            `[POD_IMPORT_ROW_FAILED] import=${importId} row=${row.id} rowNo=${row.rowNo} error=${this.formatDbError(err)}`
+            `[POD_IMPORT_ROW_FAILED] import=${importId} row=${row.id} rowNo=${
+              row.rowNo
+            } error=${this.formatDbError(err)}`
           );
         }
       });
@@ -586,7 +597,9 @@ export class PodGenerationService extends BaseService {
     }
   }
 
-  async recoverImportTasks(options: { staleMinutes?: number; limit?: number } = {}) {
+  async recoverImportTasks(
+    options: { staleMinutes?: number; limit?: number } = {}
+  ) {
     const staleMinutes = Number(options.staleMinutes ?? 30);
     const limit = this.clamp(Number(options.limit || 5), 1, 50);
     const cutoff = moment()
@@ -851,6 +864,9 @@ export class PodGenerationService extends BaseService {
     if (status === 'failed') {
       return 'failed';
     }
+    if (status === 'post_processing') {
+      return 'post_processing';
+    }
     if (status === 'prompt_generating' || status === 'prompt_ready') {
       return 'prompt_generating';
     }
@@ -913,7 +929,6 @@ export class PodGenerationService extends BaseService {
       // 按批次配置的并发数执行；失败重试会回到队列尾部，避免长时间占住同一 worker。
       await this.runItemsWithRetries(items, batch.concurrency, batch.retries);
       await this.retryImageFailuresOnce(batch);
-      await this.retryPostProcessFailures(id);
       return this.finishBatch(id);
     } finally {
       this.releaseBatchLock(id);
@@ -934,7 +949,9 @@ export class PodGenerationService extends BaseService {
             error: this.formatDbError(err),
           });
           console.error(
-            `[POD_BATCH_ASYNC_FAILED] batch=${id} error=${this.formatDbError(err)}`
+            `[POD_BATCH_ASYNC_FAILED] batch=${id} error=${this.formatDbError(
+              err
+            )}`
           );
         })
         .finally(async () => {
@@ -955,10 +972,17 @@ export class PodGenerationService extends BaseService {
       if (!row) {
         return;
       }
-      await this.finishImportRowFromBatch(row, await this.infoWithItems(batch.id));
+      await this.finishImportRowFromBatch(
+        row,
+        await this.infoWithItems(batch.id)
+      );
       const updatedRow = await this.importRowEntity.findOneBy({ id: row.id });
       console.info(
-        `[POD_IMPORT_ROW_SYNC] import=${batch.importId} row=${batch.importRowId} batch=${batch.id} batchStatus=${batch.status} rowStatus=${updatedRow?.status || '-'}`
+        `[POD_IMPORT_ROW_SYNC] import=${batch.importId} row=${
+          batch.importRowId
+        } batch=${batch.id} batchStatus=${batch.status} rowStatus=${
+          updatedRow?.status || '-'
+        }`
       );
     } catch (err) {
       const batch = await this.batchEntity.findOneBy({ id: batchId });
@@ -967,7 +991,9 @@ export class PodGenerationService extends BaseService {
             ?.status
         : '';
       console.warn(
-        `[POD_IMPORT_ROW_SYNC_FAIL] batch=${batchId} rowStatus=${rowStatus || '-'} error=${this.formatDbError(err)}`
+        `[POD_IMPORT_ROW_SYNC_FAIL] batch=${batchId} rowStatus=${
+          rowStatus || '-'
+        } error=${this.formatDbError(err)}`
       );
     }
   }
@@ -1009,7 +1035,6 @@ export class PodGenerationService extends BaseService {
       });
 
       await this.runItemsWithRetries(items, batch.concurrency, batch.retries);
-      await this.retryPostProcessFailures(id);
       return this.finishBatch(id);
     } finally {
       this.releaseBatchLock(id);
@@ -1048,7 +1073,6 @@ export class PodGenerationService extends BaseService {
       1,
       batch.retries
     );
-    await this.retryPostProcessFailures(batch.id);
     return this.refreshBatchAfterSingleOperation(batch.id);
   }
 
@@ -1108,7 +1132,6 @@ export class PodGenerationService extends BaseService {
       error: null,
     });
     await this.runItemsWithRetries(items, batch.concurrency, batch.retries);
-    await this.retryPostProcessFailures(batchId);
     return this.refreshBatchAfterSingleOperation(batchId);
   }
 
@@ -1140,12 +1163,16 @@ export class PodGenerationService extends BaseService {
   }
 
   async cutoutItem(id: number) {
-    // 单图抠图：对已经生成成功的图片执行 ComfyUI 背景移除，并直接回写当前图片记录。
+    // 单图抠图：复用后处理队列入口，避免和后台队列形成两套状态机。
     const item = await this.itemEntity.findOneBy({ id });
     if (!item) {
       throw new CoolCommException('任务项不存在');
     }
-    if (item.status === 'running' || item.status === 'cutout_running') {
+    if (
+      item.status === 'running' ||
+      item.status === 'cutout_running' ||
+      item.cutoutStatus === 'running'
+    ) {
       throw new CoolCommException('处理中的图片暂时不能抠图');
     }
     if (
@@ -1160,78 +1187,22 @@ export class PodGenerationService extends BaseService {
 
     const batch = await this.ensureBatch(item.batchId);
     await this.ensureBatchNotProcessing(batch.id);
-    const startedAt = Date.now();
-    await this.itemEntity.update(id, {
-      status: 'cutout_running',
-      cutoutStatus: 'running',
-      error: null,
-      cutoutError: null,
-      verifyStatus: 'pending',
-      verifyError: null,
-    });
-
-    try {
-      const result = await this.podImageService.cutout({
-        fileName: item.fileName,
-        filePath: item.filePath,
-        imageUrl: item.imageUrl,
-        context: this.createCutoutContext(batch, item),
-      });
-      const { postProcessError, ...imageResult } = result;
-      let mockupResult = {};
-      let error = postProcessError || null;
-      let mockupStatus = 'success';
-      let mockupError = null;
-      let mockupAttempts = Number(item.mockupAttempts || 0);
-      try {
-        mockupAttempts += 1;
-        mockupResult = await this.generateMockupResult(batch, imageResult);
-      } catch (err) {
-        mockupStatus = 'failed';
-        mockupError = this.formatDbError(err, '效果图生成失败：');
-        error = mockupError;
-      }
-
-      await this.itemEntity.update(id, {
-        ...imageResult,
-        ...mockupResult,
-        status: 'success',
-        cutoutStatus: postProcessError ? 'failed' : 'success',
-        cutoutAttempts: Number(item.cutoutAttempts || 0) + 1,
-        cutoutError: postProcessError || null,
-        mockupStatus,
-        mockupError,
-        mockupAttempts,
-        error,
-        durationMs: Date.now() - startedAt,
-      });
-    } catch (err) {
-      // 抠图失败不代表原图生成失败；保留已有图片和重试入口，只记录本次抠图错误。
-      const error = this.formatDbError(err);
-      await this.itemEntity.update(id, {
-        status: item.imageUrl ? 'success' : 'failed',
-        cutoutStatus: 'failed',
-        cutoutAttempts: Number(item.cutoutAttempts || 0) + 1,
-        cutoutError: error,
-        error,
-        durationMs: Date.now() - startedAt,
-      });
-      throw err;
-    } finally {
-      await this.refreshBatchStats(batch.id);
-      await this.writeArtifacts(batch.id);
-    }
-
+    await this.processCutoutQueueItem(id, true);
+    await this.processMockupQueueItem(id, true);
     return this.refreshBatchAfterSingleOperation(batch.id);
   }
 
   async generateMockupItem(id: number) {
-    // 单独生成 T 恤效果图：只读取当前印花图，不重新生图，也不重新抠图。
+    // 单独生成 T 恤效果图：复用后处理队列入口，只读取当前印花图，不重新生图或抠图。
     const item = await this.itemEntity.findOneBy({ id });
     if (!item) {
       throw new CoolCommException('任务项不存在');
     }
-    if (item.status === 'running' || item.status === 'cutout_running') {
+    if (
+      item.status === 'running' ||
+      item.status === 'cutout_running' ||
+      item.mockupStatus === 'running'
+    ) {
       throw new CoolCommException('处理中的图片暂时不能生成效果图');
     }
     if (!item.filePath || !fs.existsSync(item.filePath)) {
@@ -1240,33 +1211,8 @@ export class PodGenerationService extends BaseService {
 
     const batch = await this.ensureBatch(item.batchId);
     await this.ensureBatchNotProcessing(batch.id);
-    try {
-      const mockupResult = await this.generateMockupResult(batch, {
-        fileName: item.fileName,
-        filePath: item.filePath,
-        imageUrl: item.imageUrl,
-      });
-      await this.itemEntity.update(id, {
-        ...mockupResult,
-        error: null,
-        mockupStatus: 'success',
-        mockupError: null,
-        mockupAttempts: Number(item.mockupAttempts || 0) + 1,
-        verifyStatus: 'pending',
-        verifyError: null,
-      });
-      await this.writeArtifacts(batch.id);
-      return this.itemEntity.findOneBy({ id });
-    } catch (err) {
-      const error = this.formatDbError(err);
-      await this.itemEntity.update(id, {
-        error,
-        mockupStatus: 'failed',
-        mockupError: error,
-        mockupAttempts: Number(item.mockupAttempts || 0) + 1,
-      });
-      throw err;
-    }
+    await this.processMockupQueueItem(id, true);
+    return this.itemEntity.findOneBy({ id });
   }
 
   async items(query: any) {
@@ -1409,7 +1355,7 @@ export class PodGenerationService extends BaseService {
         status: 'running',
         attempts,
         error: null,
-        cutoutStatus: settings.cutout?.enabled ? 'running' : 'skipped',
+        cutoutStatus: settings.cutout?.enabled ? 'pending' : 'skipped',
         cutoutError: null,
         mockupStatus: 'pending',
         mockupError: null,
@@ -1460,6 +1406,7 @@ export class PodGenerationService extends BaseService {
             timeoutMs: batch.timeoutMs,
             providerImageUrl,
             cutoutContext: this.createCutoutContext(batch, item),
+            skipCutout: true,
             onProviderImageUrl: async url => {
               await this.itemEntity.update(id, { providerImageUrl: url });
             },
@@ -1467,46 +1414,18 @@ export class PodGenerationService extends BaseService {
       );
       const imageStageMs = Date.now() - imageStageStartedAt;
       const { postProcessError, ...imageResult } = result;
-      let mockupResult = {};
-      let error = postProcessError || null;
-      let mockupStatus = 'pending';
-      let mockupError = null;
-      let mockupAttempts = Number(item.mockupAttempts || 0);
-      let mockupMs = 0;
-      let mockupStartedAt = 0;
-      if (!postProcessError) {
-        try {
-          // 只有抠图成功后才自动合成效果图，避免把带背景的原图贴到 T 恤模板上。
-          mockupStartedAt = Date.now();
-          mockupAttempts += 1;
-          mockupResult = await this.generateMockupResult(batch, imageResult);
-          mockupMs = Date.now() - mockupStartedAt;
-          mockupStatus = 'success';
-        } catch (err) {
-          mockupMs = mockupStartedAt ? Date.now() - mockupStartedAt : 0;
-          mockupStatus = 'failed';
-          mockupError = this.formatDbError(err, '效果图生成失败：');
-          error = mockupError;
-        }
-      }
+      const cutoutStatus = settings.cutout?.enabled ? 'pending' : 'skipped';
 
       await this.itemEntity.update(id, {
         ...imageResult,
-        ...mockupResult,
         status: 'success',
-        cutoutStatus: settings.cutout?.enabled
-          ? postProcessError
-            ? 'failed'
-            : 'success'
-          : 'skipped',
-        cutoutAttempts: settings.cutout?.enabled
-          ? Number(item.cutoutAttempts || 0) + 1
-          : Number(item.cutoutAttempts || 0),
+        cutoutStatus,
+        cutoutAttempts: Number(item.cutoutAttempts || 0),
         cutoutError: postProcessError || null,
-        mockupStatus: postProcessError ? 'skipped' : mockupStatus,
-        mockupError,
-        mockupAttempts,
-        error,
+        mockupStatus: 'pending',
+        mockupError: null,
+        mockupAttempts: Number(item.mockupAttempts || 0),
+        error: postProcessError || null,
         durationMs: Date.now() - startedAt,
       });
       console.info(
@@ -1515,10 +1434,9 @@ export class PodGenerationService extends BaseService {
           `batch=${batch.id}/${batch.batchNo}`,
           `item=${item.id}/${item.itemNo}`,
           `imageMs=${imageStageMs}`,
-          `mockupMs=${mockupMs}`,
           `totalMs=${Date.now() - startedAt}`,
-          `cutout=${postProcessError ? 'failed' : settings.cutout?.enabled ? 'success' : 'skipped'}`,
-          `mockup=${mockupStatus}`,
+          `cutout=${cutoutStatus}`,
+          'mockup=pending',
         ].join(' ')
       );
     } catch (err) {
@@ -1578,7 +1496,6 @@ export class PodGenerationService extends BaseService {
   }
 
   private async retryPostProcessFailures(batchId: number) {
-    const batch = await this.ensureBatch(batchId);
     const items = await this.itemEntity.find({
       where: {
         batchId,
@@ -1591,7 +1508,7 @@ export class PodGenerationService extends BaseService {
       this.isCutoutRepairableItem(item)
     );
     for (const item of cutoutRetryableItems) {
-      await this.retryCutoutOnly(batch, item);
+      await this.processCutoutQueueItem(item.id, true);
     }
 
     await this.retryMockupFailures(batchId);
@@ -1613,10 +1530,143 @@ export class PodGenerationService extends BaseService {
 
   private isCutoutRepairableItem(item: PodGenerationItemEntity) {
     return (
-      item.cutoutStatus === 'failed' &&
+      (item.cutoutStatus === 'failed' || item.cutoutStatus === 'pending') &&
       Boolean(item.filePath) &&
       fs.existsSync(item.filePath)
     );
+  }
+
+  async processQueuedCutouts(options: { limit?: number } = {}) {
+    const limit = this.clamp(Number(options.limit || 20), 1, 100);
+    const items = await this.itemEntity
+      .createQueryBuilder('a')
+      .where('a.status = :status', { status: 'success' })
+      .andWhere('a.cutoutStatus = :cutoutStatus', {
+        cutoutStatus: 'pending',
+      })
+      .andWhere('a.filePath is not null')
+      .orderBy('a.id', 'ASC')
+      .limit(limit)
+      .getMany();
+
+    await this.runPool(items, 1, item => this.processCutoutQueueItem(item.id));
+    return items.length;
+  }
+
+  async processQueuedMockups(
+    options: { limit?: number; concurrency?: number } = {}
+  ) {
+    const limit = this.clamp(Number(options.limit || 40), 1, 200);
+    const concurrency = this.clamp(Number(options.concurrency || 2), 1, 4);
+    const candidates = await this.itemEntity
+      .createQueryBuilder('a')
+      .where('a.status = :status', { status: 'success' })
+      .andWhere('a.cutoutStatus in (:...cutoutStatuses)', {
+        cutoutStatuses: ['success', 'skipped'],
+      })
+      .orderBy('a.id', 'ASC')
+      .limit(limit * 3)
+      .getMany();
+    const items = candidates
+      .filter(item => this.isMockupRepairableItem(item))
+      .slice(0, limit);
+
+    await this.runPool(items, concurrency, item =>
+      this.processMockupQueueItem(item.id)
+    );
+    return items.length;
+  }
+
+  private async processCutoutQueueItem(id: number, force = false) {
+    const item = await this.itemEntity.findOneBy({ id });
+    if (!item || item.status !== 'success') {
+      return;
+    }
+    if (
+      !force &&
+      item.cutoutStatus !== 'pending' &&
+      item.cutoutStatus !== 'failed'
+    ) {
+      return;
+    }
+    if (!item.filePath || !fs.existsSync(item.filePath)) {
+      await this.itemEntity.update(id, {
+        cutoutStatus: 'failed',
+        cutoutError: '图片文件不存在，无法抠图',
+        error: '图片文件不存在，无法抠图',
+      });
+      await this.refreshBatchAfterSingleOperation(item.batchId);
+      await this.syncImportRowAfterBatch(item.batchId);
+      return;
+    }
+
+    const claim = await this.itemEntity.update(
+      {
+        id,
+        status: 'success',
+        cutoutStatus: force
+          ? In(['pending', 'failed', 'success', 'skipped'])
+          : In(['pending', 'failed']),
+      },
+      {
+        cutoutStatus: 'running',
+        cutoutError: null,
+        verifyStatus: 'pending',
+        verifyError: null,
+      }
+    );
+    if (!claim.affected) {
+      return;
+    }
+
+    const batch = await this.ensureBatch(item.batchId);
+    const startedAt = Date.now();
+    try {
+      const imageResult = await this.podImageService.cutout({
+        fileName: item.fileName,
+        filePath: item.filePath,
+        imageUrl: item.imageUrl,
+        context: this.createCutoutContext(batch, item),
+      });
+      await this.itemEntity.update(id, {
+        ...imageResult,
+        status: 'success',
+        cutoutStatus: 'success',
+        cutoutAttempts: Number(item.cutoutAttempts || 0) + 1,
+        cutoutError: null,
+        mockupStatus: 'pending',
+        mockupError: null,
+        verifyStatus: 'pending',
+        verifyError: null,
+        error: null,
+        durationMs: Date.now() - startedAt,
+      });
+      console.info(
+        `[POD_CUTOUT_STAGE] batch=${batch.id}/${batch.batchNo} item=${
+          item.id
+        }/${item.itemNo} status=success cost=${Date.now() - startedAt}ms`
+      );
+    } catch (err) {
+      const error = this.formatDbError(err);
+      await this.itemEntity.update(id, {
+        status: 'success',
+        cutoutStatus: 'failed',
+        cutoutAttempts: Number(item.cutoutAttempts || 0) + 1,
+        cutoutError: error,
+        error,
+        durationMs: Date.now() - startedAt,
+      });
+      console.error(
+        `[POD_CUTOUT_STAGE] batch=${batch.id}/${batch.batchNo} item=${
+          item.id
+        }/${item.itemNo} status=failed cost=${
+          Date.now() - startedAt
+        }ms msg="${this.compactLogText(error, 160)}"`
+      );
+    } finally {
+      await this.refreshBatchAfterSingleOperation(batch.id);
+      await this.syncImportRowAfterBatch(batch.id);
+    }
   }
 
   private async retryImageFailuresOnce(batch: PodGenerationBatchEntity) {
@@ -1658,77 +1708,7 @@ export class PodGenerationService extends BaseService {
     await this.runItemsWithRetries(retryItems, batch.concurrency, 0);
   }
 
-  private async retryCutoutOnly(
-    batch: PodGenerationBatchEntity,
-    item: PodGenerationItemEntity
-  ) {
-    const startedAt = Date.now();
-    await this.itemEntity.update(item.id, {
-      status: 'cutout_running',
-      cutoutStatus: 'running',
-      cutoutError: null,
-      verifyStatus: 'pending',
-      verifyError: null,
-    });
-
-    try {
-      const result = await this.podImageService.cutout({
-        fileName: item.fileName,
-        filePath: item.filePath,
-        imageUrl: item.imageUrl,
-        context: this.createCutoutContext(batch, item),
-      });
-      const { postProcessError, ...imageResult } = result;
-      let mockupResult = {};
-      let error = postProcessError || null;
-      let mockupStatus = 'success';
-      let mockupError = null;
-      let mockupAttempts = Number(item.mockupAttempts || 0);
-
-      if (!postProcessError) {
-        try {
-          mockupAttempts += 1;
-          mockupResult = await this.generateMockupResult(batch, imageResult);
-        } catch (err) {
-          mockupStatus = 'failed';
-          mockupError = this.formatDbError(err, '效果图生成失败：');
-          error = mockupError;
-        }
-      } else {
-        mockupStatus = 'skipped';
-      }
-
-      await this.itemEntity.update(item.id, {
-        ...imageResult,
-        ...mockupResult,
-        status: 'success',
-        cutoutStatus: postProcessError ? 'failed' : 'success',
-        cutoutAttempts: Number(item.cutoutAttempts || 0) + 1,
-        cutoutError: postProcessError || null,
-        mockupStatus,
-        mockupError,
-        mockupAttempts,
-        error,
-        durationMs: Date.now() - startedAt,
-      });
-    } catch (err) {
-      const error = this.formatDbError(err);
-      await this.itemEntity.update(item.id, {
-        status: 'success',
-        cutoutStatus: 'failed',
-        cutoutAttempts: Number(item.cutoutAttempts || 0) + 1,
-        cutoutError: error,
-        error,
-        durationMs: Date.now() - startedAt,
-      });
-    } finally {
-      await this.refreshBatchStats(batch.id);
-      this.scheduleArtifactWrite(batch.id);
-    }
-  }
-
   private async retryMockupFailures(batchId: number) {
-    const batch = await this.ensureBatch(batchId);
     const items = await this.itemEntity.find({
       where: {
         batchId,
@@ -1741,29 +1721,85 @@ export class PodGenerationService extends BaseService {
     );
 
     for (const item of retryableItems) {
-      try {
-        const mockupResult = await this.generateMockupResult(batch, {
-          fileName: item.fileName,
-          filePath: item.filePath,
-          imageUrl: item.imageUrl,
-        });
-        await this.itemEntity.update(item.id, {
-          ...mockupResult,
-          mockupStatus: 'success',
-          mockupError: null,
-          mockupAttempts: Number(item.mockupAttempts || 0) + 1,
-          verifyStatus: 'pending',
-          verifyError: null,
-        });
-      } catch (err) {
-        const error = this.formatDbError(err, '效果图生成失败：');
-        await this.itemEntity.update(item.id, {
-          mockupStatus: 'failed',
-          mockupError: error,
-          mockupAttempts: Number(item.mockupAttempts || 0) + 1,
-          error,
-        });
+      await this.processMockupQueueItem(item.id);
+    }
+  }
+
+  private async processMockupQueueItem(id: number, force = false) {
+    const item = await this.itemEntity.findOneBy({ id });
+    if (!item || item.status !== 'success') {
+      return;
+    }
+    if (!force && !this.isMockupRepairableItem(item)) {
+      return;
+    }
+    if (force && item.mockupStatus === 'running') {
+      return;
+    }
+    if (
+      force &&
+      (item.cutoutStatus === 'failed' || item.cutoutStatus === 'running')
+    ) {
+      throw new CoolCommException('当前图片抠图未完成，不能生成效果图');
+    }
+
+    const claim = await this.itemEntity.update(
+      {
+        id,
+        status: 'success',
+        mockupStatus: item.mockupStatus,
+      },
+      {
+        mockupStatus: 'running',
+        mockupError: null,
+        verifyStatus: 'pending',
+        verifyError: null,
       }
+    );
+    if (!claim.affected) {
+      return;
+    }
+
+    const batch = await this.ensureBatch(item.batchId);
+    const startedAt = Date.now();
+    try {
+      const mockupResult = await this.generateMockupResult(batch, {
+        fileName: item.fileName,
+        filePath: item.filePath,
+        imageUrl: item.imageUrl,
+      });
+      await this.itemEntity.update(item.id, {
+        ...mockupResult,
+        mockupStatus: 'success',
+        mockupError: null,
+        mockupAttempts: Number(item.mockupAttempts || 0) + 1,
+        verifyStatus: 'pending',
+        verifyError: null,
+        error: null,
+      });
+      console.info(
+        `[POD_MOCKUP_STAGE] batch=${batch.id}/${batch.batchNo} item=${
+          item.id
+        }/${item.itemNo} status=success cost=${Date.now() - startedAt}ms`
+      );
+    } catch (err) {
+      const error = this.formatDbError(err, '效果图生成失败：');
+      await this.itemEntity.update(item.id, {
+        mockupStatus: 'failed',
+        mockupError: error,
+        mockupAttempts: Number(item.mockupAttempts || 0) + 1,
+        error,
+      });
+      console.error(
+        `[POD_MOCKUP_STAGE] batch=${batch.id}/${batch.batchNo} item=${
+          item.id
+        }/${item.itemNo} status=failed cost=${
+          Date.now() - startedAt
+        }ms msg="${this.compactLogText(error, 160)}"`
+      );
+    } finally {
+      await this.refreshBatchAfterSingleOperation(batch.id);
+      await this.syncImportRowAfterBatch(batch.id);
     }
   }
 
@@ -1772,6 +1808,9 @@ export class PodGenerationService extends BaseService {
       return false;
     }
     if (item.cutoutStatus === 'failed' || item.cutoutStatus === 'running') {
+      return false;
+    }
+    if (item.mockupStatus === 'running') {
       return false;
     }
     if (item.mockupStatus === 'failed' || item.mockupStatus === 'pending') {
@@ -2009,17 +2048,23 @@ export class PodGenerationService extends BaseService {
     if (!stats.approvedPromptCount) {
       return 'prompt_ready';
     }
-    if (this.hasPostProcessIssues(postProcessStats)) {
-      return 'partial_failed';
+    if (
+      stats.failedCount > 0 ||
+      artifactFailedCount > 0 ||
+      this.hasPostProcessFailures(postProcessStats)
+    ) {
+      return stats.successCount > 0 ? 'partial_failed' : 'failed';
     }
-    return stats.failedCount === 0 && artifactFailedCount === 0
-      ? 'completed'
-      : stats.successCount > 0
-      ? 'partial_failed'
-      : 'failed';
+    if (this.hasPostProcessPending(postProcessStats)) {
+      return 'post_processing';
+    }
+    return 'completed';
   }
 
   private async resolveImportRowStatusFromBatch(batch: any) {
+    if (batch.status === 'post_processing') {
+      return 'post_processing';
+    }
     if (batch.status === 'partial_failed') {
       return 'completed';
     }
@@ -2033,6 +2078,12 @@ export class PodGenerationService extends BaseService {
   }
 
   private async resolveImportRowErrorFromBatch(batch: any) {
+    if (batch.status === 'post_processing') {
+      const messages = this.formatPostProcessIssues(
+        await this.getPostProcessStats(batch.id)
+      );
+      return messages.length ? messages.join('；') : null;
+    }
     if (batch.status === 'partial_failed') {
       const messages = this.formatPostProcessIssues(
         await this.getPostProcessStats(batch.id)
@@ -2060,12 +2111,20 @@ export class PodGenerationService extends BaseService {
 
   private hasPostProcessIssues(stats: PostProcessStats) {
     return (
+      this.hasPostProcessFailures(stats) || this.hasPostProcessPending(stats)
+    );
+  }
+
+  private hasPostProcessFailures(stats: PostProcessStats) {
+    return (
       stats.cutoutFailedCount > 0 ||
-      stats.cutoutPendingCount > 0 ||
       stats.mockupFailedCount > 0 ||
-      stats.mockupMissingCount > 0 ||
       stats.verifyFailedCount > 0
     );
+  }
+
+  private hasPostProcessPending(stats: PostProcessStats) {
+    return stats.cutoutPendingCount > 0 || stats.mockupMissingCount > 0;
   }
 
   private formatPostProcessIssues(stats: PostProcessStats) {
@@ -2124,7 +2183,7 @@ export class PodGenerationService extends BaseService {
     if (item.mockupStatus === 'failed') {
       return false;
     }
-    if (item.mockupStatus === 'pending') {
+    if (item.mockupStatus === 'pending' || item.mockupStatus === 'running') {
       return true;
     }
     if (!item.mockupImageUrl || !item.mockupFilePath) {
