@@ -1021,8 +1021,8 @@ export class PodGenerationService extends BaseService {
         { batchId: id, status: 'failed', promptStatus: 'approved' },
         {
           status: 'pending',
+          attempts: 0,
           error: null,
-          providerImageUrl: null,
           cutoutStatus: 'pending',
           cutoutError: null,
           mockupStatus: 'pending',
@@ -1122,7 +1122,6 @@ export class PodGenerationService extends BaseService {
         status: 'pending',
         attempts: 0,
         error: null,
-        providerImageUrl: null,
         cutoutStatus: 'pending',
         cutoutError: null,
         mockupStatus: 'pending',
@@ -1466,6 +1465,7 @@ export class PodGenerationService extends BaseService {
           status: 'pending',
           attempts,
           error: this.formatDbError(err),
+          providerImageUrl: null,
           cutoutStatus: 'pending',
           cutoutError: null,
           mockupStatus: 'pending',
@@ -1494,7 +1494,10 @@ export class PodGenerationService extends BaseService {
   }
 
   private formatDbError(err: any, prefix = '') {
-    const raw = err?.message || String(err || '未知错误');
+    const responseData = err?.response?.data
+      ? ` ${this.compactLogText(JSON.stringify(err.response.data), 300)}`
+      : '';
+    const raw = `${err?.message || String(err || '未知错误')}${responseData}`;
     const compact = String(raw).replace(/\s+/g, ' ').trim();
     const text = `${prefix}${compact}`;
     // pod_generation_item.error / pod_generation_batch.error 当前是 varchar(1000)，这里预留余量避免 MySQL 写入失败。
@@ -1781,8 +1784,8 @@ export class PodGenerationService extends BaseService {
       { id: In(failedItems.map(item => item.id)) },
       {
         status: 'pending',
+        attempts: 0,
         error: null,
-        providerImageUrl: null,
         cutoutStatus: 'pending',
         cutoutError: null,
         mockupStatus: 'pending',
@@ -1800,7 +1803,7 @@ export class PodGenerationService extends BaseService {
       },
       order: { id: 'ASC' },
     });
-    await this.runItemsWithRetries(retryItems, batch.concurrency, 0);
+    await this.runItemsWithRetries(retryItems, batch.concurrency, 1);
   }
 
   private async retryMockupFailures(batchId: number) {

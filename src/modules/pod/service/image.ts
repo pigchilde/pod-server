@@ -1,6 +1,8 @@
 import { Inject, Provide } from '@midwayjs/core';
 import axios from 'axios';
 import * as fs from 'fs';
+import * as http from 'http';
+import * as https from 'https';
 import * as path from 'path';
 import * as sharp from 'sharp';
 import { PodSettingService, PodModuleSettings } from './setting';
@@ -156,10 +158,7 @@ export class PodImageService {
       await input.onProviderImageUrl?.(providerImageUrl);
     }
 
-    const image = await axios.get(providerImageUrl, {
-      responseType: 'arraybuffer',
-      timeout: input.timeoutMs,
-    });
+    const image = await this.downloadProviderImage(providerImageUrl, input);
 
     const result = await this.saveBuffer(
       Buffer.from(image.data),
@@ -173,6 +172,94 @@ export class PodImageService {
       ...result,
       providerImageUrl,
     };
+  }
+
+  private async downloadProviderImage(
+    providerImageUrl: string,
+    input: PodGenerateImageInput
+  ) {
+    const attempts = 5;
+    let lastError: any = null;
+    for (let index = 1; index <= attempts; index += 1) {
+      try {
+        return await this.downloadUrlToBuffer(providerImageUrl, input.timeoutMs);
+      } catch (err) {
+        lastError = err;
+        if (index >= attempts) {
+          break;
+        }
+        await this.sleep(index * 2000);
+      }
+    }
+    const status = lastError?.response?.status;
+    const code = lastError?.code;
+    const message = lastError?.message || String(lastError || '未知错误');
+    throw new Error(
+      `图片生成成功但下载失败：status=${status || '-'} code=${
+        code || '-'
+      } url=${providerImageUrl} message=${message}`
+    );
+  }
+
+  private downloadUrlToBuffer(
+    url: string,
+    timeoutMs: number,
+    redirectCount = 0
+  ): Promise<{ data: Buffer; headers: Record<string, any> }> {
+    return new Promise((resolve, reject) => {
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        reject(new Error(`图片下载地址无效：${url}`));
+        return;
+      }
+
+      const client = parsed.protocol === 'http:' ? http : https;
+      const req = client.get(parsed, res => {
+        const statusCode = Number(res.statusCode || 0);
+        const location = res.headers.location;
+        if (
+          statusCode >= 300 &&
+          statusCode < 400 &&
+          location &&
+          redirectCount < 5
+        ) {
+          res.resume();
+          const nextUrl = new URL(location, parsed).toString();
+          this.downloadUrlToBuffer(nextUrl, timeoutMs, redirectCount + 1)
+            .then(resolve)
+            .catch(reject);
+          return;
+        }
+
+        if (statusCode < 200 || statusCode >= 300) {
+          res.resume();
+          reject(new Error(`图片下载响应异常：status=${statusCode} url=${url}`));
+          return;
+        }
+
+        const chunks: Buffer[] = [];
+        res.on('data', chunk => {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        });
+        res.on('end', () => {
+          resolve({
+            data: Buffer.concat(chunks),
+            headers: res.headers,
+          });
+        });
+        res.on('aborted', () => {
+          reject(new Error(`图片下载流中断：url=${url}`));
+        });
+        res.on('error', reject);
+      });
+
+      req.setTimeout(timeoutMs, () => {
+        req.destroy(new Error(`图片下载超时：${timeoutMs}ms url=${url}`));
+      });
+      req.on('error', reject);
+    });
   }
 
   private async saveBase64(
@@ -351,6 +438,10 @@ export class PodImageService {
       return 'gif';
     }
     return 'png';
+  }
+
+  private sleep(ms: number) {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   private escapeXml(value: string) {
