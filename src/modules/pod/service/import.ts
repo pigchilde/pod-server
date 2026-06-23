@@ -2,6 +2,7 @@ import { Init, Provide } from '@midwayjs/core';
 import { BaseService, CoolCommException } from '@cool-midway/core';
 import { InjectEntityModel } from '@midwayjs/typeorm';
 import { In, Repository } from 'typeorm';
+import * as fs from 'fs';
 import { PodGenerationImportEntity } from '../entity/import';
 import { PodGenerationImportRowEntity } from '../entity/import-row';
 import { PodGenerationBatchEntity } from '../entity/batch';
@@ -109,64 +110,99 @@ export class PodGenerationImportService extends BaseService {
       return rows;
     }
 
-    const [batches, progressRows] = await Promise.all([
+    const [batches, items] = await Promise.all([
       this.batchEntity.find({
         where: { id: In(batchIds) },
       }),
       this.itemEntity
-        .createQueryBuilder('item')
-        .select('item.batchId', 'batchId')
-        .addSelect(
-          "SUM(CASE WHEN item.status = 'success' THEN 1 ELSE 0 END)",
-          'successCount'
-        )
-        .addSelect(
-          "SUM(CASE WHEN item.status = 'failed' THEN 1 ELSE 0 END)",
-          'failedCount'
-        )
-        .addSelect(
-          "SUM(CASE WHEN item.cutoutStatus = 'failed' THEN 1 ELSE 0 END)",
-          'cutoutFailedCount'
-        )
-        .addSelect(
-          "SUM(CASE WHEN item.mockupStatus = 'failed' THEN 1 ELSE 0 END)",
-          'mockupFailedCount'
-        )
-        .addSelect(
-          "SUM(CASE WHEN item.verifyStatus = 'failed' THEN 1 ELSE 0 END)",
-          'verifyFailedCount'
-        )
-        .where('item.batchId IN (:...batchIds)', { batchIds })
-        .groupBy('item.batchId')
-        .getRawMany(),
+        .find({
+          where: { batchId: In(batchIds) },
+          order: { batchId: 'ASC', id: 'ASC' },
+        }),
     ]);
     const batchMap = new Map(batches.map(batch => [batch.id, batch]));
-    const progressMap = new Map(
-      progressRows.map(row => [
-        Number(row.batchId),
-        {
-          successCount: Number(row.successCount || 0),
-          failedCount: Number(row.failedCount || 0),
-          cutoutFailedCount: Number(row.cutoutFailedCount || 0),
-          mockupFailedCount: Number(row.mockupFailedCount || 0),
-          verifyFailedCount: Number(row.verifyFailedCount || 0),
-        },
-      ])
-    );
+    const progressMap = new Map<number, any>();
+    for (const item of items) {
+      const progress = progressMap.get(item.batchId) || {
+        successCount: 0,
+        failedCount: 0,
+        cutoutFailedCount: 0,
+        cutoutPendingCount: 0,
+        mockupFailedCount: 0,
+        mockupMissingCount: 0,
+        verifyFailedCount: 0,
+      };
+      if (item.status === 'success') {
+        progress.successCount += 1;
+        if (item.cutoutStatus === 'failed') {
+          progress.cutoutFailedCount += 1;
+        } else if (
+          item.cutoutStatus === 'pending' ||
+          item.cutoutStatus === 'running'
+        ) {
+          progress.cutoutPendingCount += 1;
+        }
+        if (item.mockupStatus === 'failed') {
+          progress.mockupFailedCount += 1;
+        } else if (this.isMockupMissingItem(item)) {
+          progress.mockupMissingCount += 1;
+        }
+        if (item.verifyStatus === 'failed') {
+          progress.verifyFailedCount += 1;
+        }
+      } else if (item.status === 'failed') {
+        progress.failedCount += 1;
+      }
+      progressMap.set(item.batchId, progress);
+    }
 
     return rows.map(row => {
       const batch = batchMap.get(row.batchId);
       const progress = progressMap.get(row.batchId);
+      const hasPostProcessIssues = Boolean(
+        progress &&
+          (progress.cutoutFailedCount ||
+            progress.cutoutPendingCount ||
+            progress.mockupFailedCount ||
+            progress.mockupMissingCount ||
+            progress.verifyFailedCount)
+      );
+      const batchStatus =
+        batch?.status === 'completed' && hasPostProcessIssues
+          ? 'partial_failed'
+          : batch?.status || '';
       return {
         ...row,
-        batchStatus: batch?.status || '',
+        status:
+          row.status === 'completed' && hasPostProcessIssues
+            ? 'post_processing'
+            : row.status,
+        batchStatus,
         batchCount: batch?.count || row.count || 0,
         batchSuccessCount: progress?.successCount || 0,
         batchFailedCount: progress?.failedCount || 0,
         cutoutFailedCount: progress?.cutoutFailedCount || 0,
+        cutoutPendingCount: progress?.cutoutPendingCount || 0,
         mockupFailedCount: progress?.mockupFailedCount || 0,
+        mockupMissingCount: progress?.mockupMissingCount || 0,
         verifyFailedCount: progress?.verifyFailedCount || 0,
       };
     });
+  }
+
+  private isMockupMissingItem(item: PodGenerationItemEntity) {
+    if (item.cutoutStatus === 'failed' || item.cutoutStatus === 'running') {
+      return false;
+    }
+    if (item.mockupStatus === 'failed') {
+      return false;
+    }
+    if (item.mockupStatus === 'pending') {
+      return true;
+    }
+    if (!item.mockupImageUrl || !item.mockupFilePath) {
+      return true;
+    }
+    return !fs.existsSync(item.mockupFilePath);
   }
 }

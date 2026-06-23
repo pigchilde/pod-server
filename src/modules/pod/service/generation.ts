@@ -23,6 +23,14 @@ class ImportRunNotAcquiredError extends Error {
   }
 }
 
+interface PostProcessStats {
+  cutoutFailedCount: number;
+  cutoutPendingCount: number;
+  mockupFailedCount: number;
+  mockupMissingCount: number;
+  verifyFailedCount: number;
+}
+
 /**
  * POD批量生成
  */
@@ -798,15 +806,12 @@ export class PodGenerationService extends BaseService {
     row: PodGenerationImportRowEntity,
     batch: any
   ) {
+    const rowStatus = await this.resolveImportRowStatusFromBatch(batch);
     await this.importRowEntity.update(row.id, {
-      status: this.isBatchTerminalSuccess(batch.status)
-        ? 'completed'
-        : 'failed',
+      status: rowStatus,
       batchId: batch.id,
       batchNo: batch.batchNo,
-      error: this.isBatchTerminalSuccess(batch.status)
-        ? null
-        : batch.error || `批次状态：${batch.status}`,
+      error: await this.resolveImportRowErrorFromBatch(batch),
     });
     await this.refreshImportStats(row.importId);
     return this.importRowEntity.findOneBy({ id: row.id });
@@ -1760,11 +1765,13 @@ export class PodGenerationService extends BaseService {
       promptStatus: 'approved',
     });
     const activeCount = await this.countActiveItems(id);
+    const postProcessStats = await this.getPostProcessStats(id);
     const status = this.resolveBatchStatus(
       stats,
       pendingCount,
       activeCount,
-      artifactStats.failedCount
+      artifactStats.failedCount,
+      postProcessStats
     );
     await this.batchEntity.update(id, { status });
     await this.writeArtifacts(id);
@@ -1872,11 +1879,13 @@ export class PodGenerationService extends BaseService {
       promptStatus: 'approved',
     });
     const activeCount = await this.countActiveItems(id);
+    const postProcessStats = await this.getPostProcessStats(id);
     const status = this.resolveBatchStatus(
       stats,
       pendingCount,
       activeCount,
-      artifactStats.failedCount
+      artifactStats.failedCount,
+      postProcessStats
     );
     await this.batchEntity.update(id, { status });
     await this.writeArtifacts(id);
@@ -1892,7 +1901,8 @@ export class PodGenerationService extends BaseService {
     },
     pendingCount: number,
     activeCount: number,
-    artifactFailedCount = 0
+    artifactFailedCount = 0,
+    postProcessStats: PostProcessStats = this.emptyPostProcessStats()
   ) {
     if (activeCount > 0) {
       return 'image_generating';
@@ -1903,11 +1913,119 @@ export class PodGenerationService extends BaseService {
     if (!stats.approvedPromptCount) {
       return 'prompt_ready';
     }
+    if (this.hasPostProcessIssues(postProcessStats)) {
+      return 'partial_failed';
+    }
     return stats.failedCount === 0 && artifactFailedCount === 0
       ? 'completed'
       : stats.successCount > 0
       ? 'partial_failed'
       : 'failed';
+  }
+
+  private async resolveImportRowStatusFromBatch(batch: any) {
+    if (!this.isBatchTerminalSuccess(batch.status)) {
+      return 'failed';
+    }
+    const postProcessStats = await this.getPostProcessStats(batch.id);
+    return this.hasPostProcessIssues(postProcessStats)
+      ? 'post_processing'
+      : 'completed';
+  }
+
+  private async resolveImportRowErrorFromBatch(batch: any) {
+    if (!this.isBatchTerminalSuccess(batch.status)) {
+      return batch.error || `批次状态：${batch.status}`;
+    }
+    const messages = this.formatPostProcessIssues(
+      await this.getPostProcessStats(batch.id)
+    );
+    return messages.length ? messages.join('；') : null;
+  }
+
+  private emptyPostProcessStats(): PostProcessStats {
+    return {
+      cutoutFailedCount: 0,
+      cutoutPendingCount: 0,
+      mockupFailedCount: 0,
+      mockupMissingCount: 0,
+      verifyFailedCount: 0,
+    };
+  }
+
+  private hasPostProcessIssues(stats: PostProcessStats) {
+    return (
+      stats.cutoutFailedCount > 0 ||
+      stats.cutoutPendingCount > 0 ||
+      stats.mockupFailedCount > 0 ||
+      stats.mockupMissingCount > 0 ||
+      stats.verifyFailedCount > 0
+    );
+  }
+
+  private formatPostProcessIssues(stats: PostProcessStats) {
+    const messages = [];
+    if (stats.cutoutFailedCount) {
+      messages.push(`抠图失败 ${stats.cutoutFailedCount}`);
+    }
+    if (stats.cutoutPendingCount) {
+      messages.push(`抠图未完成 ${stats.cutoutPendingCount}`);
+    }
+    if (stats.mockupFailedCount) {
+      messages.push(`效果图失败 ${stats.mockupFailedCount}`);
+    }
+    if (stats.mockupMissingCount) {
+      messages.push(`效果图缺失 ${stats.mockupMissingCount}`);
+    }
+    if (stats.verifyFailedCount) {
+      messages.push(`检查失败 ${stats.verifyFailedCount}`);
+    }
+    return messages;
+  }
+
+  private async getPostProcessStats(batchId: number) {
+    const items = await this.itemEntity.find({
+      where: { batchId, status: 'success' },
+      order: { id: 'ASC' },
+    });
+    const stats = this.emptyPostProcessStats();
+    for (const item of items) {
+      if (item.cutoutStatus === 'failed') {
+        stats.cutoutFailedCount += 1;
+      } else if (
+        item.cutoutStatus === 'pending' ||
+        item.cutoutStatus === 'running'
+      ) {
+        stats.cutoutPendingCount += 1;
+      }
+
+      if (item.mockupStatus === 'failed') {
+        stats.mockupFailedCount += 1;
+      } else if (this.isMockupMissingItem(item)) {
+        stats.mockupMissingCount += 1;
+      }
+
+      if (item.verifyStatus === 'failed') {
+        stats.verifyFailedCount += 1;
+      }
+    }
+    return stats;
+  }
+
+  private isMockupMissingItem(item: PodGenerationItemEntity) {
+    if (item.cutoutStatus === 'failed' || item.cutoutStatus === 'running') {
+      return false;
+    }
+    if (item.mockupStatus === 'failed') {
+      return false;
+    }
+    if (item.mockupStatus === 'pending') {
+      return true;
+    }
+    if (!item.mockupImageUrl || !item.mockupFilePath) {
+      return true;
+    }
+    return !fs.existsSync(item.mockupFilePath);
   }
 
   private async countActiveItems(batchId: number) {
