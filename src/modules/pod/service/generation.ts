@@ -502,9 +502,9 @@ export class PodGenerationService extends BaseService {
           results.push({
             rowId: row.id,
             rowNo: row.rowNo,
-            status: updated?.status === 'completed' ? 'repaired' : 'failed',
+            status: this.resolveImportRepairResultStatus(updated?.status),
           });
-        } else if (row.status === 'failed' || row.status === 'pending') {
+        } else if (!['completed', 'created'].includes(row.status)) {
           const updated = await this.retryImportRow(row.id);
           results.push({
             rowId: row.id,
@@ -773,7 +773,10 @@ export class PodGenerationService extends BaseService {
 
     const promptCount = await this.itemEntity.countBy({ batchId: batch.id });
     if (!promptCount) {
-      if (batch.status === 'prompt_generating') {
+      if (
+        batch.status === 'prompt_generating' &&
+        !this.isStaleTime(batch.updateTime, 30)
+      ) {
         await this.importRowEntity.update(row.id, {
           status: 'prompt_generating',
           batchId: batch.id,
@@ -1050,7 +1053,7 @@ export class PodGenerationService extends BaseService {
     if (item.promptStatus !== 'approved') {
       throw new CoolCommException('请先确认该提示词');
     }
-    if (item.status === 'running' || item.status === 'cutout_running') {
+    if (item.status === 'running') {
       throw new CoolCommException('处理中的图片不能重复提交');
     }
     const batch = await this.ensureBatch(item.batchId);
@@ -1101,9 +1104,7 @@ export class PodGenerationService extends BaseService {
       throw new CoolCommException('只能重新生成已确认提示词的图片');
     }
     if (
-      items.some(
-        item => item.status === 'running' || item.status === 'cutout_running'
-      )
+      items.some(item => item.status === 'running')
     ) {
       throw new CoolCommException('处理中的图片不能重复提交');
     }
@@ -1142,6 +1143,9 @@ export class PodGenerationService extends BaseService {
 
     try {
       const batch = await this.ensureBatch(id);
+      await this.recoverStaleProcessingItems({
+        batchId: batch.id,
+      });
       if ((await this.countActiveItems(id)) > 0) {
         throw new CoolCommException('当前批次正在生成中，请稍后再修复');
       }
@@ -1170,7 +1174,6 @@ export class PodGenerationService extends BaseService {
     }
     if (
       item.status === 'running' ||
-      item.status === 'cutout_running' ||
       item.cutoutStatus === 'running'
     ) {
       throw new CoolCommException('处理中的图片暂时不能抠图');
@@ -1186,7 +1189,7 @@ export class PodGenerationService extends BaseService {
     }
 
     const batch = await this.ensureBatch(item.batchId);
-    await this.ensureBatchNotProcessing(batch.id);
+    this.ensureBatchMainImageNotProcessing(batch.id);
     await this.processCutoutQueueItem(id, true);
     await this.processMockupQueueItem(id, true);
     return this.refreshBatchAfterSingleOperation(batch.id);
@@ -1200,7 +1203,6 @@ export class PodGenerationService extends BaseService {
     }
     if (
       item.status === 'running' ||
-      item.status === 'cutout_running' ||
       item.mockupStatus === 'running'
     ) {
       throw new CoolCommException('处理中的图片暂时不能生成效果图');
@@ -1210,7 +1212,7 @@ export class PodGenerationService extends BaseService {
     }
 
     const batch = await this.ensureBatch(item.batchId);
-    await this.ensureBatchNotProcessing(batch.id);
+    this.ensureBatchMainImageNotProcessing(batch.id);
     await this.processMockupQueueItem(id, true);
     return this.itemEntity.findOneBy({ id });
   }
@@ -1286,7 +1288,7 @@ export class PodGenerationService extends BaseService {
     if (!item) {
       throw new CoolCommException('任务项不存在');
     }
-    if (item.status === 'running' || item.status === 'cutout_running') {
+    if (item.status === 'running') {
       throw new CoolCommException('处理中的任务不能编辑');
     }
 
@@ -1536,7 +1538,88 @@ export class PodGenerationService extends BaseService {
     );
   }
 
-  async processQueuedCutouts(options: { limit?: number } = {}) {
+  async recoverStaleProcessingItems(
+    options: { batchId?: number; staleMinutes?: number } = {}
+  ) {
+    const staleMinutes = this.resolvePostProcessStaleMinutes(
+      options.staleMinutes
+    );
+    const cutoff = moment()
+      .subtract(staleMinutes, 'minutes')
+      .format('YYYY-MM-DD HH:mm:ss');
+    const base = this.itemEntity
+      .createQueryBuilder()
+      .update(PodGenerationItemEntity)
+      .where('updateTime <= :cutoff', { cutoff });
+    if (options.batchId) {
+      base.andWhere('batchId = :batchId', { batchId: options.batchId });
+    }
+
+    const imageReset = base
+      .clone()
+      .set({
+        status: 'pending',
+        error: '生图任务超时，已重置为待生成',
+        cutoutStatus: 'pending',
+        cutoutError: null,
+        mockupStatus: 'pending',
+        mockupError: null,
+        verifyStatus: 'pending',
+        verifyError: null,
+      })
+      .andWhere('status = :runningStatus', { runningStatus: 'running' })
+      .execute();
+    const cutoutReset = base
+      .clone()
+      .set({
+        cutoutStatus: 'pending',
+        cutoutError: '抠图任务超时，已重置为待处理',
+        verifyStatus: 'pending',
+        verifyError: null,
+      })
+      .andWhere('status = :successStatus', { successStatus: 'success' })
+      .andWhere('cutoutStatus = :cutoutRunning', {
+        cutoutRunning: 'running',
+      })
+      .execute();
+    const mockupReset = base
+      .clone()
+      .set({
+        mockupStatus: 'pending',
+        mockupError: '效果图任务超时，已重置为待处理',
+        verifyStatus: 'pending',
+        verifyError: null,
+      })
+      .andWhere('status = :successStatus', { successStatus: 'success' })
+      .andWhere('mockupStatus = :mockupRunning', {
+        mockupRunning: 'running',
+      })
+      .execute();
+    const [imageResult, cutoutResult, mockupResult] = await Promise.all([
+      imageReset,
+      cutoutReset,
+      mockupReset,
+    ]);
+    const total =
+      Number(imageResult.affected || 0) +
+      Number(cutoutResult.affected || 0) +
+      Number(mockupResult.affected || 0);
+    if (total > 0) {
+      console.warn(
+        `[POD_STALE_RECOVER] batch=${options.batchId || '-'} image=${imageResult.affected || 0} cutout=${cutoutResult.affected || 0} mockup=${mockupResult.affected || 0} staleMinutes=${staleMinutes}`
+      );
+    }
+    return total;
+  }
+
+  async processQueuedCutouts(
+    options: { limit?: number; staleMinutes?: number; recoverStale?: boolean } = {}
+  ) {
+    if (options.recoverStale !== false) {
+      await this.recoverStaleProcessingItems({
+        staleMinutes: options.staleMinutes,
+      });
+    }
     const limit = this.clamp(Number(options.limit || 20), 1, 100);
     const items = await this.itemEntity
       .createQueryBuilder('a')
@@ -1554,8 +1637,18 @@ export class PodGenerationService extends BaseService {
   }
 
   async processQueuedMockups(
-    options: { limit?: number; concurrency?: number } = {}
+    options: {
+      limit?: number;
+      concurrency?: number;
+      staleMinutes?: number;
+      recoverStale?: boolean;
+    } = {}
   ) {
+    if (options.recoverStale !== false) {
+      await this.recoverStaleProcessingItems({
+        staleMinutes: options.staleMinutes,
+      });
+    }
     const limit = this.clamp(Number(options.limit || 40), 1, 200);
     const concurrency = this.clamp(Number(options.concurrency || 2), 1, 4);
     const candidates = await this.itemEntity
@@ -2193,12 +2286,24 @@ export class PodGenerationService extends BaseService {
   }
 
   private async countActiveItems(batchId: number) {
-    return this.itemEntity.count({
-      where: {
-        batchId,
-        status: In(['running', 'cutout_running']),
-      },
-    });
+    return this.itemEntity
+      .createQueryBuilder('a')
+      .where('a.batchId = :batchId', { batchId })
+      .andWhere(
+        '(a.status in (:...statuses) or a.cutoutStatus = :cutoutRunning or a.mockupStatus = :mockupRunning)',
+        {
+          statuses: ['running'],
+          cutoutRunning: 'running',
+          mockupRunning: 'running',
+        }
+      )
+      .getCount();
+  }
+
+  private ensureBatchMainImageNotProcessing(batchId: number) {
+    if (this.runningBatchIds.has(batchId)) {
+      throw new CoolCommException('当前批次正在生成中，请稍后再操作单张图片');
+    }
   }
 
   private async ensureBatchNotProcessing(batchId: number) {
@@ -2588,6 +2693,39 @@ export class PodGenerationService extends BaseService {
     } catch {
       return false;
     }
+  }
+
+  private isStaleTime(value: any, staleMinutes: number) {
+    if (!value) {
+      return true;
+    }
+    const time = moment(value);
+    if (!time.isValid()) {
+      return true;
+    }
+    return time.isBefore(moment().subtract(staleMinutes, 'minutes'));
+  }
+
+  private resolvePostProcessStaleMinutes(staleMinutes?: number) {
+    return this.clamp(
+      Number(staleMinutes || process.env.POD_POST_PROCESS_STALE_MINUTES || 10),
+      1,
+      1440
+    );
+  }
+
+  private resolveImportRepairResultStatus(status?: string) {
+    if (status === 'completed') {
+      return 'repaired';
+    }
+    if (
+      ['post_processing', 'image_generating', 'prompt_generating'].includes(
+        status || ''
+      )
+    ) {
+      return 'processing';
+    }
+    return status || 'failed';
   }
 
   private resolveOutputDir(date: string, topicSlug: string, outputDir: string) {

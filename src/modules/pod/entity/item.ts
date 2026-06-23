@@ -105,7 +105,7 @@ export class PodGenerationItemEntity extends BaseEntity {
 
   @Index()
   @Column({
-    comment: '状态 pending/running/cutout_running/success/failed',
+    comment: '状态 pending/running/success/failed',
     length: 30,
     default: 'pending',
   })

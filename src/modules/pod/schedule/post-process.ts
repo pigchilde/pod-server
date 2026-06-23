@@ -18,17 +18,21 @@ export class PodPostProcessSchedule implements CommonSchedule {
   // 轻量轮询即可；抠图内部固定串行，效果图内部小并发。
   @TaskLocal('*/20 * * * * *')
   async exec() {
+    const staleCount =
+      await this.podGenerationService.recoverStaleProcessingItems();
     const cutoutCount = await this.podGenerationService.processQueuedCutouts({
       limit: 10,
+      recoverStale: false,
     });
     const mockupCount = await this.podGenerationService.processQueuedMockups({
       limit: 20,
       concurrency: 2,
+      recoverStale: false,
     });
 
-    if (cutoutCount || mockupCount) {
+    if (staleCount || cutoutCount || mockupCount) {
       this.logger.info(
-        `[POD_POST_PROCESS] cutout=${cutoutCount} mockup=${mockupCount}`
+        `[POD_POST_PROCESS] stale=${staleCount} cutout=${cutoutCount} mockup=${mockupCount}`
       );
     }
   }
