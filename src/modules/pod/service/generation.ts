@@ -15,6 +15,10 @@ import { PodImageService } from './image';
 import { PodPromptModelService } from './prompt-model';
 import { PodSettingService } from './setting';
 import { PodMockupService } from './mockup';
+import {
+  isStaleTime,
+  resolvePostProcessStaleMinutes,
+} from '../utils/stale';
 
 class ImportRunNotAcquiredError extends Error {
   constructor(message = '当前导入任务正在执行中或已结束') {
@@ -775,7 +779,7 @@ export class PodGenerationService extends BaseService {
     if (!promptCount) {
       if (
         batch.status === 'prompt_generating' &&
-        !this.isStaleTime(batch.updateTime, 30)
+        !isStaleTime(batch.updateTime, 30)
       ) {
         await this.importRowEntity.update(row.id, {
           status: 'prompt_generating',
@@ -1541,9 +1545,7 @@ export class PodGenerationService extends BaseService {
   async recoverStaleProcessingItems(
     options: { batchId?: number; staleMinutes?: number } = {}
   ) {
-    const staleMinutes = this.resolvePostProcessStaleMinutes(
-      options.staleMinutes
-    );
+    const staleMinutes = resolvePostProcessStaleMinutes(options.staleMinutes);
     const cutoff = moment()
       .subtract(staleMinutes, 'minutes')
       .format('YYYY-MM-DD HH:mm:ss');
@@ -2693,25 +2695,6 @@ export class PodGenerationService extends BaseService {
     } catch {
       return false;
     }
-  }
-
-  private isStaleTime(value: any, staleMinutes: number) {
-    if (!value) {
-      return true;
-    }
-    const time = moment(value);
-    if (!time.isValid()) {
-      return true;
-    }
-    return time.isBefore(moment().subtract(staleMinutes, 'minutes'));
-  }
-
-  private resolvePostProcessStaleMinutes(staleMinutes?: number) {
-    return this.clamp(
-      Number(staleMinutes || process.env.POD_POST_PROCESS_STALE_MINUTES || 10),
-      1,
-      1440
-    );
   }
 
   private resolveImportRepairResultStatus(status?: string) {

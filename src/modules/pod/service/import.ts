@@ -7,6 +7,10 @@ import { PodGenerationImportEntity } from '../entity/import';
 import { PodGenerationImportRowEntity } from '../entity/import-row';
 import { PodGenerationBatchEntity } from '../entity/batch';
 import { PodGenerationItemEntity } from '../entity/item';
+import {
+  isStaleTime,
+  resolvePostProcessStaleMinutes,
+} from '../utils/stale';
 
 /**
  * POD表格导入记录
@@ -94,6 +98,49 @@ export class PodGenerationImportService extends BaseService {
         size,
         total,
       },
+    };
+  }
+
+  async queueStats(id: number) {
+    const importId = Number(id);
+    const record = await this.importEntity.findOneBy({ id: importId });
+    if (!record) {
+      throw new CoolCommException('导入记录不存在');
+    }
+
+    const rows = await this.rowEntity.find({
+      where: { importId },
+      order: { rowNo: 'ASC', id: 'ASC' },
+    });
+    const batchIds = rows.map(row => row.batchId).filter(Boolean);
+    const [batches, items] = batchIds.length
+      ? await Promise.all([
+          this.batchEntity.find({
+            where: { id: In(batchIds) },
+            order: { id: 'ASC' },
+          }),
+          this.itemEntity.find({
+            where: { batchId: In(batchIds) },
+            order: { updateTime: 'DESC', id: 'ASC' },
+          }),
+        ])
+      : [[], []];
+    const batchMap = new Map(batches.map(batch => [batch.id, batch]));
+    const rowMap = new Map(rows.map(row => [row.batchId, row]));
+    const staleMinutes = resolvePostProcessStaleMinutes();
+
+    return {
+      importId: record.id,
+      importNo: record.importNo,
+      fileName: record.fileName,
+      status: record.status,
+      staleMinutes,
+      queues: [
+        this.buildImportPromptQueue(rows, batches),
+        this.buildImageQueue(items, batchMap, rowMap, staleMinutes),
+        this.buildCutoutQueue(items, batchMap, rowMap, staleMinutes),
+        this.buildMockupQueue(items, batchMap, rowMap, staleMinutes),
+      ],
     };
   }
 
@@ -188,6 +235,241 @@ export class PodGenerationImportService extends BaseService {
         verifyFailedCount: progress?.verifyFailedCount || 0,
       };
     });
+  }
+
+  private buildImportPromptQueue(
+    rows: PodGenerationImportRowEntity[],
+    batches: PodGenerationBatchEntity[]
+  ) {
+    const runningStatuses = ['creating_batch', 'prompt_generating'];
+    const pendingStatuses = ['pending'];
+    const successStatuses = [
+      'created',
+      'image_generating',
+      'post_processing',
+      'verifying',
+      'completed',
+    ];
+    const failedStatuses = ['failed'];
+    const statusCounts = this.countBy(rows, row => row.status || 'pending');
+    const promptStatusCounts = this.countBy(
+      batches,
+      batch => batch.status || 'pending'
+    );
+    const watchRows = rows
+      .filter(
+        row =>
+          runningStatuses.includes(row.status) ||
+          failedStatuses.includes(row.status) ||
+          pendingStatuses.includes(row.status)
+      )
+      .slice(0, 20)
+      .map(row => ({
+        id: row.id,
+        rowNo: row.rowNo,
+        batchId: row.batchId,
+        batchNo: row.batchNo,
+        topic: row.topic,
+        status: row.status,
+        updateTime: row.updateTime,
+        error: row.error,
+      }));
+
+    return {
+      key: 'importPrompt',
+      name: '导入 / Prompt',
+      totalHint: '导入行总数，后续阶段中的行表示已越过 Prompt 阶段',
+      total: rows.length,
+      pending: this.sumStatus(statusCounts, pendingStatuses),
+      running: this.sumStatus(statusCounts, runningStatuses),
+      success: this.sumStatus(statusCounts, successStatuses),
+      failed: this.sumStatus(statusCounts, failedStatuses),
+      skipped: 0,
+      stale: 0,
+      statuses: {
+        ...statusCounts,
+        prompt_generating_batches: promptStatusCounts.prompt_generating || 0,
+        prompt_ready_batches: promptStatusCounts.prompt_ready || 0,
+      },
+      items: watchRows,
+    };
+  }
+
+  private buildImageQueue(
+    items: PodGenerationItemEntity[],
+    batchMap: Map<number, PodGenerationBatchEntity>,
+    rowMap: Map<number, PodGenerationImportRowEntity>,
+    staleMinutes: number
+  ) {
+    const statusCounts = this.countBy(items, item => item.status || 'pending');
+    const staleItems = items.filter(
+      item =>
+        item.status === 'running' &&
+        isStaleTime(item.updateTime, staleMinutes)
+    );
+    return {
+      key: 'image',
+      name: '生图队列',
+      totalHint: '已创建的图片任务总数',
+      total: items.length,
+      pending: statusCounts.pending || 0,
+      running: statusCounts.running || 0,
+      success: statusCounts.success || 0,
+      failed: statusCounts.failed || 0,
+      skipped: 0,
+      stale: staleItems.length,
+      statuses: statusCounts,
+      items: this.pickQueueItems(
+        items,
+        item => ['running', 'failed', 'pending'].includes(item.status),
+        item => item.status,
+        batchMap,
+        rowMap,
+        staleMinutes
+      ),
+    };
+  }
+
+  private buildCutoutQueue(
+    items: PodGenerationItemEntity[],
+    batchMap: Map<number, PodGenerationBatchEntity>,
+    rowMap: Map<number, PodGenerationImportRowEntity>,
+    staleMinutes: number
+  ) {
+    const cutoutItems = items.filter(item => item.status === 'success');
+    const statusCounts = this.countBy(
+      cutoutItems,
+      item => item.cutoutStatus || 'pending'
+    );
+    const staleItems = cutoutItems.filter(
+      item =>
+        item.cutoutStatus === 'running' &&
+        isStaleTime(item.updateTime, staleMinutes)
+    );
+    return {
+      key: 'cutout',
+      name: '抠图队列',
+      totalHint: '已完成生图并进入抠图判断范围的图片数',
+      total: cutoutItems.length,
+      pending: statusCounts.pending || 0,
+      running: statusCounts.running || 0,
+      success: statusCounts.success || 0,
+      failed: statusCounts.failed || 0,
+      skipped: statusCounts.skipped || 0,
+      stale: staleItems.length,
+      statuses: statusCounts,
+      items: this.pickQueueItems(
+        cutoutItems,
+        item => ['running', 'failed', 'pending'].includes(item.cutoutStatus),
+        item => item.cutoutStatus,
+        batchMap,
+        rowMap,
+        staleMinutes
+      ),
+    };
+  }
+
+  private buildMockupQueue(
+    items: PodGenerationItemEntity[],
+    batchMap: Map<number, PodGenerationBatchEntity>,
+    rowMap: Map<number, PodGenerationImportRowEntity>,
+    staleMinutes: number
+  ) {
+    const mockupItems = items.filter(
+      item =>
+        item.status === 'success' &&
+        ['success', 'skipped'].includes(item.cutoutStatus)
+    );
+    const statusCounts = this.countBy(
+      mockupItems,
+      item => item.mockupStatus || 'pending'
+    );
+    const staleItems = mockupItems.filter(
+      item =>
+        item.mockupStatus === 'running' &&
+        isStaleTime(item.updateTime, staleMinutes)
+    );
+    return {
+      key: 'mockup',
+      name: '效果图队列',
+      totalHint: '已完成或跳过抠图并进入效果图判断范围的图片数',
+      total: mockupItems.length,
+      pending: statusCounts.pending || 0,
+      running: statusCounts.running || 0,
+      success: statusCounts.success || 0,
+      failed: statusCounts.failed || 0,
+      skipped: statusCounts.skipped || 0,
+      stale: staleItems.length,
+      statuses: statusCounts,
+      items: this.pickQueueItems(
+        mockupItems,
+        item => ['running', 'failed', 'pending'].includes(item.mockupStatus),
+        item => item.mockupStatus,
+        batchMap,
+        rowMap,
+        staleMinutes
+      ),
+    };
+  }
+
+  private pickQueueItems(
+    items: PodGenerationItemEntity[],
+    predicate: (item: PodGenerationItemEntity) => boolean,
+    statusGetter: (item: PodGenerationItemEntity) => string,
+    batchMap: Map<number, PodGenerationBatchEntity>,
+    rowMap: Map<number, PodGenerationImportRowEntity>,
+    staleMinutes: number
+  ) {
+    const priority = {
+      running: 1,
+      failed: 2,
+      pending: 3,
+    } as Record<string, number>;
+    return items
+      .filter(predicate)
+      .sort((a, b) => {
+        const statusA = statusGetter(a) || '';
+        const statusB = statusGetter(b) || '';
+        return (
+          (priority[statusA] || 99) - (priority[statusB] || 99) ||
+          a.id - b.id
+        );
+      })
+      .slice(0, 20)
+      .map(item => {
+        const batch = batchMap.get(item.batchId);
+        const row = rowMap.get(item.batchId);
+        const status = statusGetter(item) || 'pending';
+        return {
+          id: item.id,
+          rowNo: row?.rowNo || null,
+          batchId: item.batchId,
+          batchNo: batch?.batchNo || row?.batchNo || '',
+          itemNo: item.itemNo,
+          topic: batch?.topic || row?.topic || '',
+          status,
+          stale:
+            status === 'running' &&
+            isStaleTime(item.updateTime, staleMinutes),
+          updateTime: item.updateTime,
+          error: item.error || item.cutoutError || item.mockupError || '',
+        };
+      });
+  }
+
+  private countBy<T>(items: T[], getter: (item: T) => string) {
+    return items.reduce((map, item) => {
+      const key = getter(item);
+      map[key] = (map[key] || 0) + 1;
+      return map;
+    }, {} as Record<string, number>);
+  }
+
+  private sumStatus(counts: Record<string, number>, statuses: string[]) {
+    return statuses.reduce(
+      (sum, status) => sum + Number(counts[status] || 0),
+      0
+    );
   }
 
   private isMockupMissingItem(item: PodGenerationItemEntity) {

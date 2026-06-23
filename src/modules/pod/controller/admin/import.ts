@@ -41,6 +41,13 @@ export class AdminPodGenerationImportController extends BaseController {
     return this.ok(await this.podGenerationImportService.rows(body));
   }
 
+  @Get('/queueStats', { summary: '导入队列运行情况' })
+  async queueStats(@Query('id') id: number) {
+    return this.ok(
+      await this.podGenerationImportService.queueStats(this.parseId(id))
+    );
+  }
+
   @Post('/retryRow', { summary: '重试导入行' })
   async retryRow(@Body('id') id: number) {
     return this.ok(
