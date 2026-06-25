@@ -377,16 +377,27 @@ export class PodGenerationImportService extends BaseService {
   ) {
     const mockupItems = items.filter(item => item.status === 'success');
     const waitingCutoutItems = mockupItems.filter(
+      item => this.isWaitingCutoutForMockup(item)
+    );
+    const queueItems = mockupItems.filter(
       item =>
-        !['success', 'skipped'].includes(item.cutoutStatus) &&
-        item.mockupStatus !== 'success' &&
-        item.mockupStatus !== 'failed'
+        this.isWaitingCutoutForMockup(item) ||
+        ['running', 'failed', 'pending'].includes(item.mockupStatus) ||
+        this.isMockupMissingItem(item)
     );
-    const statusCounts = this.countBy(
-      mockupItems,
-      item => item.mockupStatus || 'pending'
+    const completedItems = mockupItems.filter(
+      item =>
+        ['success', 'skipped'].includes(item.cutoutStatus) &&
+        item.mockupStatus === 'success' &&
+        !this.isMockupMissingItem(item)
     );
-    const staleItems = mockupItems.filter(
+    const skippedItems = mockupItems.filter(
+      item => item.mockupStatus === 'skipped'
+    );
+    const statusCounts = this.countBy(queueItems, item =>
+      this.getMockupQueueStatus(item)
+    );
+    const staleItems = queueItems.filter(
       item =>
         item.mockupStatus === 'running' &&
         isStaleTime(item.updateTime, staleMinutes)
@@ -394,28 +405,51 @@ export class PodGenerationImportService extends BaseService {
     return {
       key: 'mockup',
       name: '效果图队列',
-      totalHint: '已完成生图并等待或正在生成效果图的图片数',
-      total: mockupItems.length,
+      totalHint: '当前仍需等待抠图、生成效果图或修复效果图的图片数',
+      total: queueItems.length,
       pending: statusCounts.pending || 0,
       running: statusCounts.running || 0,
-      success: statusCounts.success || 0,
+      success: completedItems.length,
       failed: statusCounts.failed || 0,
-      skipped: statusCounts.skipped || 0,
+      skipped: skippedItems.length,
       waitingCutout: waitingCutoutItems.length,
       stale: staleItems.length,
       statuses: {
         ...statusCounts,
+        completed: completedItems.length,
+        skipped: skippedItems.length,
         waiting_cutout: waitingCutoutItems.length,
       },
       items: this.pickQueueItems(
-        mockupItems,
-        item => ['running', 'failed', 'pending'].includes(item.mockupStatus),
-        item => item.mockupStatus,
+        queueItems,
+        item =>
+          ['running', 'failed', 'pending'].includes(
+            this.getMockupQueueStatus(item)
+          ),
+        item => this.getMockupQueueStatus(item),
         batchMap,
         rowMap,
         staleMinutes
       ),
     };
+  }
+
+  private isWaitingCutoutForMockup(item: PodGenerationItemEntity) {
+    return (
+      !['success', 'skipped'].includes(item.cutoutStatus) &&
+      item.mockupStatus !== 'success' &&
+      item.mockupStatus !== 'failed'
+    );
+  }
+
+  private getMockupQueueStatus(item: PodGenerationItemEntity) {
+    if (this.isWaitingCutoutForMockup(item)) {
+      return 'pending';
+    }
+    if (this.isMockupMissingItem(item) && item.mockupStatus === 'success') {
+      return 'pending';
+    }
+    return item.mockupStatus || 'pending';
   }
 
   private pickQueueItems(
