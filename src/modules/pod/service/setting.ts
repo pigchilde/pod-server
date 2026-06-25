@@ -34,6 +34,7 @@ export interface PodModuleSettings {
     endpoint: string;
     apiKey: string;
     model: string;
+    concurrency: number;
     timeoutMs: number;
     temperature: number;
     maxTokens: number;
@@ -263,6 +264,7 @@ export class PodSettingService {
         endpoint: promptProvider.endpoint,
         apiKey: promptProvider.apiKey,
         model: promptProvider.model,
+        concurrency: promptProvider.concurrency,
         timeoutMs: this.numInRange(
           value?.prompt?.timeoutMs,
           defaults.prompt.timeoutMs,

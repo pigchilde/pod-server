@@ -556,10 +556,14 @@ export class PodGenerationService extends BaseService {
         throw new ImportRunNotAcquiredError();
       }
 
-      const record = await this.importEntity.findOneBy({ id: importId });
+      const [record, settings] = await Promise.all([
+        this.importEntity.findOneBy({ id: importId }),
+        this.podSettingService.getSettings(),
+      ]);
       const promptConcurrency = this.clamp(
         Number(
           record?.options?.promptConcurrency ||
+            settings.prompt?.concurrency ||
             process.env.POD_IMPORT_PROMPT_CONCURRENCY ||
             3
         ),
