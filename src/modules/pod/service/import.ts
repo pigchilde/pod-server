@@ -375,10 +375,12 @@ export class PodGenerationImportService extends BaseService {
     rowMap: Map<number, PodGenerationImportRowEntity>,
     staleMinutes: number
   ) {
-    const mockupItems = items.filter(
+    const mockupItems = items.filter(item => item.status === 'success');
+    const waitingCutoutItems = mockupItems.filter(
       item =>
-        item.status === 'success' &&
-        ['success', 'skipped'].includes(item.cutoutStatus)
+        !['success', 'skipped'].includes(item.cutoutStatus) &&
+        item.mockupStatus !== 'success' &&
+        item.mockupStatus !== 'failed'
     );
     const statusCounts = this.countBy(
       mockupItems,
@@ -392,15 +394,19 @@ export class PodGenerationImportService extends BaseService {
     return {
       key: 'mockup',
       name: '效果图队列',
-      totalHint: '已完成或跳过抠图并进入效果图判断范围的图片数',
+      totalHint: '已完成生图并等待或正在生成效果图的图片数',
       total: mockupItems.length,
       pending: statusCounts.pending || 0,
       running: statusCounts.running || 0,
       success: statusCounts.success || 0,
       failed: statusCounts.failed || 0,
       skipped: statusCounts.skipped || 0,
+      waitingCutout: waitingCutoutItems.length,
       stale: staleItems.length,
-      statuses: statusCounts,
+      statuses: {
+        ...statusCounts,
+        waiting_cutout: waitingCutoutItems.length,
+      },
       items: this.pickQueueItems(
         mockupItems,
         item => ['running', 'failed', 'pending'].includes(item.mockupStatus),
