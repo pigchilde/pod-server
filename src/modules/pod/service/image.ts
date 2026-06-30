@@ -18,6 +18,7 @@ export interface PodGenerateImageInput {
   onProviderImageUrl?: (url: string) => Promise<void>;
   cutoutContext?: PodCutoutContext;
   skipCutout?: boolean;
+  resizeOutput?: boolean;
 }
 
 export interface PodGenerateImageResult {
@@ -305,15 +306,20 @@ export class PodImageService {
   ) {
     // 先把图片模型返回的结果落盘；抠图服务异常时，也不能丢掉已经生成好的原图。
     await fs.promises.mkdir(input.outputDir, { recursive: true });
+    const normalizedExt = this.normalizeImageExt(ext);
+    const shouldResizeOutput = input.resizeOutput !== false;
     const fileExt =
-      ext === 'svg'
+      normalizedExt === 'svg'
         ? 'svg'
-        : settings?.generation?.outputSize || settings?.cutout?.enabled
+        : shouldResizeOutput &&
+          (settings?.generation?.outputSize || settings?.cutout?.enabled)
         ? 'png'
-        : ext;
+        : this.extensionFromBuffer(buffer) || normalizedExt;
     const fileName = `${input.fileBaseName}.${fileExt}`;
     const filePath = path.join(input.outputDir, fileName);
-    const fallbackBuffer = await this.resizeToOutputSize(buffer, ext, settings);
+    const fallbackBuffer = shouldResizeOutput
+      ? await this.resizeToOutputSize(buffer, normalizedExt, settings)
+      : buffer;
     let outputBuffer = fallbackBuffer;
     let postProcessError = '';
 
@@ -328,7 +334,7 @@ export class PodImageService {
         );
         outputBuffer = await this.resizeToOutputSize(
           cutoutBuffer,
-          ext,
+          normalizedExt,
           settings
         );
       }
@@ -443,6 +449,47 @@ export class PodImageService {
       return 'gif';
     }
     return 'png';
+  }
+
+  private extensionFromBuffer(buffer: Buffer) {
+    const signature = buffer.subarray(0, 16);
+    if (
+      signature.length >= 8 &&
+      signature
+        .subarray(0, 8)
+        .equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    ) {
+      return 'png';
+    }
+    if (
+      signature.length >= 3 &&
+      signature[0] === 0xff &&
+      signature[1] === 0xd8 &&
+      signature[2] === 0xff
+    ) {
+      return 'jpg';
+    }
+    if (
+      signature.length >= 12 &&
+      signature.toString('ascii', 0, 4) === 'RIFF' &&
+      signature.toString('ascii', 8, 12) === 'WEBP'
+    ) {
+      return 'webp';
+    }
+    if (
+      signature.length >= 6 &&
+      ['GIF87a', 'GIF89a'].includes(signature.toString('ascii', 0, 6))
+    ) {
+      return 'gif';
+    }
+    return '';
+  }
+
+  private normalizeImageExt(ext = '') {
+    const value = String(ext || '')
+      .replace(/^\./, '')
+      .toLowerCase();
+    return value || 'png';
   }
 
   private sleep(ms: number) {

@@ -1405,6 +1405,7 @@ export class PodGenerationService extends BaseService {
             providerImageUrl,
             cutoutContext: this.createCutoutContext(batch, item),
             skipCutout: true,
+            resizeOutput: !settings.cutout?.enabled,
             onProviderImageUrl: async url => {
               await this.itemEntity.update(id, { providerImageUrl: url });
             },
