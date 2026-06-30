@@ -182,7 +182,10 @@ export class PodImageService {
     let lastError: any = null;
     for (let index = 1; index <= attempts; index += 1) {
       try {
-        return await this.downloadUrlToBuffer(providerImageUrl, input.timeoutMs);
+        return await this.downloadUrlToBuffer(
+          providerImageUrl,
+          input.timeoutMs
+        );
       } catch (err) {
         lastError = err;
         if (index >= attempts) {
@@ -235,7 +238,9 @@ export class PodImageService {
 
         if (statusCode < 200 || statusCode >= 300) {
           res.resume();
-          reject(new Error(`图片下载响应异常：status=${statusCode} url=${url}`));
+          reject(
+            new Error(`图片下载响应异常：status=${statusCode} url=${url}`)
+          );
           return;
         }
 

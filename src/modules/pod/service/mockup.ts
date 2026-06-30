@@ -64,7 +64,7 @@ export class PodMockupService {
     const printWidth = printMeta.width || maxPrintWidth;
     const printHeight = printMeta.height || maxPrintHeight;
     const left = Math.max(0, Math.round((templateWidth - printWidth) / 2));
-    // T.png 当前是平铺黑色 T 恤，0.3 的纵向比例大致落在胸前印花区。
+    // Tshirt.jpg 当前是平铺黑色 T 恤，0.27 的纵向比例让印花略高于胸前中心。
     const top = Math.max(
       0,
       Math.min(
@@ -105,20 +105,20 @@ export class PodMockupService {
         ? configured
         : path.resolve(process.cwd(), configured);
     }
-    return path.join(batchOutputDir, '..', '..', 'T.png');
+    return path.join(batchOutputDir, '..', '..', 'Tshirt.jpg');
   }
 
   private getLayoutOptions() {
     return {
       maxPrintWidthRatio: this.ratio(
         this.mockupConfig?.maxPrintWidthRatio,
-        0.52
+        0.56
       ),
       maxPrintHeightRatio: this.ratio(
         this.mockupConfig?.maxPrintHeightRatio,
-        0.42
+        0.46
       ),
-      topRatio: this.ratio(this.mockupConfig?.topRatio, 0.3),
+      topRatio: this.ratio(this.mockupConfig?.topRatio, 0.27),
     };
   }
 

@@ -1910,6 +1910,9 @@ export class PodGenerationService extends BaseService {
     if (item.cutoutStatus === 'failed' || item.cutoutStatus === 'running') {
       return false;
     }
+    if (item.mockupStatus === 'skipped') {
+      return false;
+    }
     if (item.mockupStatus === 'running') {
       return false;
     }
