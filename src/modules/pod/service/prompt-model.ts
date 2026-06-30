@@ -129,7 +129,7 @@ JSON shape:
       "subTheme": "short English subtheme",
       "prompt": "English image prompt describing only the unique visual concept, subject, style, mood, composition details, and key objects for this one print.",
       "seoFileName": "lowercase-kebab-case-5-to-10-keywords",
-      "seoTitle": "SEO friendly English title",
+      "seoTitle": "TEMU-ready viral men's T-shirt listing title in English, 22 words max",
       "tags": ["tag1", "tag2", "tag3"]
     }
   ]
@@ -140,6 +140,14 @@ Rules:
 - Each item must be visually distinct.
 - Keep prompts safe and original.
 - Do not mention Disney, Marvel, Pokemon, celebrities, brands, sports teams, or trademarked terms.
+- seoTitle must be written in English only. Do not include Chinese characters.
+- seoTitle must be a TEMU-ready viral men's T-shirt listing title.
+- seoTitle must include "Men's T-Shirt".
+- seoTitle must use high-conversion keywords that fit the design, such as funny, vintage, graphic, streetwear, aesthetic, cool, casual, summer, gift, trendy, or similar.
+- seoTitle must reflect the main visible elements from the design concept.
+- seoTitle must match styles young shoppers like.
+- seoTitle must not include cotton, 100% cotton, all cotton, full cotton, or any fabric-composition claim.
+- seoTitle must be no more than 22 words.
 - Do not repeat shared POD production requirements such as transparent background, no mockup, no shirt, no model, no watermark, no brand logo, 1:1, or resolution. Those are applied by module settings.`;
   }
 
@@ -175,7 +183,7 @@ Rules:
         seoFileName: this.slugify(
           item.seoFileName || item.seoTitle || item.subTheme
         ),
-        seoTitle: item.seoTitle ? String(item.seoTitle).slice(0, 180) : '',
+        seoTitle: this.normalizeSeoTitle(item.seoTitle || item.subTheme),
         tags: Array.isArray(item.tags) ? item.tags.map(tag => String(tag)) : [],
       };
     });
@@ -202,6 +210,25 @@ Rules:
       .filter(Boolean)
       .slice(0, 10)
       .join('-');
+  }
+
+  private normalizeSeoTitle(value: string) {
+    let title = String(value || '')
+      .replace(/[\u4e00-\u9fff]/g, ' ')
+      .replace(/\b(100%\s*)?(all\s+|full\s+)?cotton\b/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!title) {
+      title = "Graphic Men's T-Shirt";
+    }
+    const hasMensTshirt = /\bmen'?s\s+t-?shirt\b/i.test(title);
+    const maxWords = hasMensTshirt ? 22 : 20;
+    const words = title.split(/\s+/).filter(Boolean).slice(0, maxWords);
+    title = words.join(' ').replace(/[. ]+$/g, '').trim();
+    if (!hasMensTshirt) {
+      title = `${title} Men's T-Shirt`;
+    }
+    return title.slice(0, 180);
   }
 
   private requireEndpoint(endpoint: string, label: string) {
