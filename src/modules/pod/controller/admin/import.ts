@@ -79,6 +79,28 @@ export class AdminPodGenerationImportController extends BaseController {
     return this.ok(await this.podGenerationService.runImport(this.parseId(id)));
   }
 
+  @Post('/repairQueueItem', { summary: '修复单个队列项' })
+  async repairQueueItem(@Body() body: any) {
+    return this.ok(
+      await this.podGenerationImportService.repairQueueItem({
+        importId: Number(body?.importId),
+        queueKey: String(body?.queueKey || ''),
+        targetId: Number(body?.targetId),
+        targetType: body?.targetType || 'item',
+      })
+    );
+  }
+
+  @Post('/repairQueue', { summary: '批量修复当前队列失败项' })
+  async repairQueue(@Body() body: any) {
+    return this.ok(
+      await this.podGenerationImportService.repairQueue({
+        importId: Number(body?.importId),
+        queueKey: String(body?.queueKey || ''),
+      })
+    );
+  }
+
   private parseId(id: number) {
     const value = Number(id);
     if (!value || !Number.isFinite(value)) {

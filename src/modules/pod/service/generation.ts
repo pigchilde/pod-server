@@ -15,10 +15,7 @@ import { PodImageService } from './image';
 import { PodPromptModelService } from './prompt-model';
 import { PodSettingService } from './setting';
 import { PodMockupService } from './mockup';
-import {
-  isStaleTime,
-  resolvePostProcessStaleMinutes,
-} from '../utils/stale';
+import { isStaleTime, resolvePostProcessStaleMinutes } from '../utils/stale';
 
 class ImportRunNotAcquiredError extends Error {
   constructor(message = '当前导入任务正在执行中或已结束') {
@@ -1111,9 +1108,7 @@ export class PodGenerationService extends BaseService {
     if (items.some(item => item.promptStatus !== 'approved')) {
       throw new CoolCommException('只能重新生成已确认提示词的图片');
     }
-    if (
-      items.some(item => item.status === 'running')
-    ) {
+    if (items.some(item => item.status === 'running')) {
       throw new CoolCommException('处理中的图片不能重复提交');
     }
 
@@ -1179,10 +1174,7 @@ export class PodGenerationService extends BaseService {
     if (!item) {
       throw new CoolCommException('任务项不存在');
     }
-    if (
-      item.status === 'running' ||
-      item.cutoutStatus === 'running'
-    ) {
+    if (item.status === 'running' || item.cutoutStatus === 'running') {
       throw new CoolCommException('处理中的图片暂时不能抠图');
     }
     if (
@@ -1208,10 +1200,7 @@ export class PodGenerationService extends BaseService {
     if (!item) {
       throw new CoolCommException('任务项不存在');
     }
-    if (
-      item.status === 'running' ||
-      item.mockupStatus === 'running'
-    ) {
+    if (item.status === 'running' || item.mockupStatus === 'running') {
       throw new CoolCommException('处理中的图片暂时不能生成效果图');
     }
     if (!item.filePath || !fs.existsSync(item.filePath)) {
@@ -1615,14 +1604,22 @@ export class PodGenerationService extends BaseService {
       Number(mockupResult.affected || 0);
     if (total > 0) {
       console.warn(
-        `[POD_STALE_RECOVER] batch=${options.batchId || '-'} image=${imageResult.affected || 0} cutout=${cutoutResult.affected || 0} mockup=${mockupResult.affected || 0} staleMinutes=${staleMinutes}`
+        `[POD_STALE_RECOVER] batch=${options.batchId || '-'} image=${
+          imageResult.affected || 0
+        } cutout=${cutoutResult.affected || 0} mockup=${
+          mockupResult.affected || 0
+        } staleMinutes=${staleMinutes}`
       );
     }
     return total;
   }
 
   async processQueuedCutouts(
-    options: { limit?: number; staleMinutes?: number; recoverStale?: boolean } = {}
+    options: {
+      limit?: number;
+      staleMinutes?: number;
+      recoverStale?: boolean;
+    } = {}
   ) {
     if (options.recoverStale !== false) {
       await this.recoverStaleProcessingItems({
@@ -1840,7 +1837,8 @@ export class PodGenerationService extends BaseService {
     }
     if (
       force &&
-      (item.cutoutStatus === 'failed' || item.cutoutStatus === 'running')
+      item.cutoutStatus !== 'success' &&
+      item.cutoutStatus !== 'skipped'
     ) {
       throw new CoolCommException('当前图片抠图未完成，不能生成效果图');
     }
@@ -2313,6 +2311,14 @@ export class PodGenerationService extends BaseService {
     if (this.runningBatchIds.has(batchId)) {
       throw new CoolCommException('当前批次正在生成中，请稍后再操作单张图片');
     }
+  }
+
+  /**
+   * 批次主图是否正在生成中（内存锁判断）。
+   * 队列修复元数据用它判断"当前批次生图中"这类阻塞，避免和实际执行规则不一致。
+   */
+  isBatchMainImageRunning(batchId: number) {
+    return this.runningBatchIds.has(Number(batchId));
   }
 
   private async ensureBatchNotProcessing(batchId: number) {

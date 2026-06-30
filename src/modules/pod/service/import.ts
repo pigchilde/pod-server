@@ -1,4 +1,4 @@
-import { Init, Provide } from '@midwayjs/core';
+import { Init, Inject, Provide } from '@midwayjs/core';
 import { BaseService, CoolCommException } from '@cool-midway/core';
 import { InjectEntityModel } from '@midwayjs/typeorm';
 import { In, Repository } from 'typeorm';
@@ -7,10 +7,8 @@ import { PodGenerationImportEntity } from '../entity/import';
 import { PodGenerationImportRowEntity } from '../entity/import-row';
 import { PodGenerationBatchEntity } from '../entity/batch';
 import { PodGenerationItemEntity } from '../entity/item';
-import {
-  isStaleTime,
-  resolvePostProcessStaleMinutes,
-} from '../utils/stale';
+import { PodGenerationService } from './generation';
+import { isStaleTime, resolvePostProcessStaleMinutes } from '../utils/stale';
 
 /**
  * POD表格导入记录
@@ -28,6 +26,9 @@ export class PodGenerationImportService extends BaseService {
 
   @InjectEntityModel(PodGenerationItemEntity)
   itemEntity: Repository<PodGenerationItemEntity>;
+
+  @Inject()
+  podGenerationService: PodGenerationService;
 
   @Init()
   async init() {
@@ -161,11 +162,10 @@ export class PodGenerationImportService extends BaseService {
       this.batchEntity.find({
         where: { id: In(batchIds) },
       }),
-      this.itemEntity
-        .find({
-          where: { batchId: In(batchIds) },
-          order: { batchId: 'ASC', id: 'ASC' },
-        }),
+      this.itemEntity.find({
+        where: { batchId: In(batchIds) },
+        order: { batchId: 'ASC', id: 'ASC' },
+      }),
     ]);
     const batchMap = new Map(batches.map(batch => [batch.id, batch]));
     const progressMap = new Map<number, any>();
@@ -256,24 +256,17 @@ export class PodGenerationImportService extends BaseService {
       batches,
       batch => batch.status || 'pending'
     );
-    const watchRows = rows
+    const watchRowCandidates = rows
       .filter(
         row =>
           runningStatuses.includes(row.status) ||
           failedStatuses.includes(row.status) ||
           pendingStatuses.includes(row.status)
       )
-      .slice(0, 20)
-      .map(row => ({
-        id: row.id,
-        rowNo: row.rowNo,
-        batchId: row.batchId,
-        batchNo: row.batchNo,
-        topic: row.topic,
-        status: row.status,
-        updateTime: row.updateTime,
-        error: row.error,
-      }));
+      .map(row => this.buildImportPromptQueueItem(row));
+    // blocked 总数统计全量候选，不受展示前 20 条截断影响。
+    const blockedCount = watchRowCandidates.filter(row => row.blocked).length;
+    const watchRows = watchRowCandidates.slice(0, 20);
 
     return {
       key: 'importPrompt',
@@ -286,6 +279,7 @@ export class PodGenerationImportService extends BaseService {
       failed: this.sumStatus(statusCounts, failedStatuses),
       skipped: 0,
       stale: 0,
+      blocked: blockedCount,
       statuses: {
         ...statusCounts,
         prompt_generating_batches: promptStatusCounts.prompt_generating || 0,
@@ -304,8 +298,16 @@ export class PodGenerationImportService extends BaseService {
     const statusCounts = this.countBy(items, item => item.status || 'pending');
     const staleItems = items.filter(
       item =>
-        item.status === 'running' &&
-        isStaleTime(item.updateTime, staleMinutes)
+        item.status === 'running' && isStaleTime(item.updateTime, staleMinutes)
+    );
+    const { items: queueItems, blocked } = this.pickQueueItems(
+      items,
+      item => ['running', 'failed', 'pending'].includes(item.status),
+      item => item.status,
+      batchMap,
+      rowMap,
+      staleMinutes,
+      'image'
     );
     return {
       key: 'image',
@@ -318,15 +320,9 @@ export class PodGenerationImportService extends BaseService {
       failed: statusCounts.failed || 0,
       skipped: 0,
       stale: staleItems.length,
+      blocked,
       statuses: statusCounts,
-      items: this.pickQueueItems(
-        items,
-        item => ['running', 'failed', 'pending'].includes(item.status),
-        item => item.status,
-        batchMap,
-        rowMap,
-        staleMinutes
-      ),
+      items: queueItems,
     };
   }
 
@@ -346,6 +342,15 @@ export class PodGenerationImportService extends BaseService {
         item.cutoutStatus === 'running' &&
         isStaleTime(item.updateTime, staleMinutes)
     );
+    const { items: queueItems, blocked } = this.pickQueueItems(
+      cutoutItems,
+      item => ['running', 'failed', 'pending'].includes(item.cutoutStatus),
+      item => item.cutoutStatus,
+      batchMap,
+      rowMap,
+      staleMinutes,
+      'cutout'
+    );
     return {
       key: 'cutout',
       name: '抠图队列',
@@ -357,15 +362,9 @@ export class PodGenerationImportService extends BaseService {
       failed: statusCounts.failed || 0,
       skipped: statusCounts.skipped || 0,
       stale: staleItems.length,
+      blocked,
       statuses: statusCounts,
-      items: this.pickQueueItems(
-        cutoutItems,
-        item => ['running', 'failed', 'pending'].includes(item.cutoutStatus),
-        item => item.cutoutStatus,
-        batchMap,
-        rowMap,
-        staleMinutes
-      ),
+      items: queueItems,
     };
   }
 
@@ -376,8 +375,8 @@ export class PodGenerationImportService extends BaseService {
     staleMinutes: number
   ) {
     const mockupItems = items.filter(item => item.status === 'success');
-    const waitingCutoutItems = mockupItems.filter(
-      item => this.isWaitingCutoutForMockup(item)
+    const waitingCutoutItems = mockupItems.filter(item =>
+      this.isWaitingCutoutForMockup(item)
     );
     const queueItems = mockupItems.filter(
       item =>
@@ -402,6 +401,18 @@ export class PodGenerationImportService extends BaseService {
         item.mockupStatus === 'running' &&
         isStaleTime(item.updateTime, staleMinutes)
     );
+    const mockupItemsResult = this.pickQueueItems(
+      queueItems,
+      item =>
+        ['running', 'failed', 'pending'].includes(
+          this.getMockupQueueStatus(item)
+        ),
+      item => this.getMockupQueueStatus(item),
+      batchMap,
+      rowMap,
+      staleMinutes,
+      'mockup'
+    );
     return {
       key: 'mockup',
       name: '效果图队列',
@@ -414,23 +425,14 @@ export class PodGenerationImportService extends BaseService {
       skipped: skippedItems.length,
       waitingCutout: waitingCutoutItems.length,
       stale: staleItems.length,
+      blocked: mockupItemsResult.blocked,
       statuses: {
         ...statusCounts,
         completed: completedItems.length,
         skipped: skippedItems.length,
         waiting_cutout: waitingCutoutItems.length,
       },
-      items: this.pickQueueItems(
-        queueItems,
-        item =>
-          ['running', 'failed', 'pending'].includes(
-            this.getMockupQueueStatus(item)
-          ),
-        item => this.getMockupQueueStatus(item),
-        batchMap,
-        rowMap,
-        staleMinutes
-      ),
+      items: mockupItemsResult.items,
     };
   }
 
@@ -458,28 +460,28 @@ export class PodGenerationImportService extends BaseService {
     statusGetter: (item: PodGenerationItemEntity) => string,
     batchMap: Map<number, PodGenerationBatchEntity>,
     rowMap: Map<number, PodGenerationImportRowEntity>,
-    staleMinutes: number
+    staleMinutes: number,
+    queueKey: 'image' | 'cutout' | 'mockup'
   ) {
     const priority = {
       running: 1,
       failed: 2,
       pending: 3,
     } as Record<string, number>;
-    return items
+    const mapped = items
       .filter(predicate)
       .sort((a, b) => {
         const statusA = statusGetter(a) || '';
         const statusB = statusGetter(b) || '';
         return (
-          (priority[statusA] || 99) - (priority[statusB] || 99) ||
-          a.id - b.id
+          (priority[statusA] || 99) - (priority[statusB] || 99) || a.id - b.id
         );
       })
-      .slice(0, 20)
       .map(item => {
         const batch = batchMap.get(item.batchId);
         const row = rowMap.get(item.batchId);
         const status = statusGetter(item) || 'pending';
+        const repair = this.resolveItemRepairMeta(item, queueKey, batch?.id);
         return {
           id: item.id,
           rowNo: row?.rowNo || null,
@@ -489,12 +491,22 @@ export class PodGenerationImportService extends BaseService {
           topic: batch?.topic || row?.topic || '',
           status,
           stale:
-            status === 'running' &&
-            isStaleTime(item.updateTime, staleMinutes),
+            status === 'running' && isStaleTime(item.updateTime, staleMinutes),
           updateTime: item.updateTime,
           error: item.error || item.cutoutError || item.mockupError || '',
+          imageStatus: item.status,
+          promptStatus: item.promptStatus,
+          cutoutStatus: item.cutoutStatus,
+          mockupStatus: item.mockupStatus,
+          ...repair,
         };
       });
+    // blocked 总数统计全量候选，不受展示前 20 条截断影响。
+    const blocked = mapped.filter(item => item.blocked).length;
+    return {
+      items: mapped.slice(0, 20),
+      blocked,
+    };
   }
 
   private countBy<T>(items: T[], getter: (item: T) => string) {
@@ -512,6 +524,232 @@ export class PodGenerationImportService extends BaseService {
     );
   }
 
+  /**
+   * 导入行级队列项构造（importPrompt 队列）。
+   * 只有失败/待处理且无批次冲突的行才可修复；批次主图运行中时阻塞。
+   */
+  private buildImportPromptQueueItem(row: PodGenerationImportRowEntity) {
+    const failed = row.status === 'failed';
+    const pending = row.status === 'pending';
+    const repairable = failed || pending;
+    let blocked = false;
+    let blockReason = '';
+    if (
+      row.batchId &&
+      this.podGenerationService.isBatchMainImageRunning(row.batchId)
+    ) {
+      blocked = true;
+      blockReason = '当前批次正在生成中，请稍后修复';
+    }
+    return {
+      id: row.id,
+      rowNo: row.rowNo,
+      batchId: row.batchId,
+      batchNo: row.batchNo,
+      topic: row.topic,
+      status: row.status,
+      updateTime: row.updateTime,
+      error: row.error,
+      repairable: repairable && !blocked,
+      blocked,
+      blockReason,
+      repairAction: 'repairImportRow',
+      repairTargetType: 'row' as const,
+      repairTargetId: row.id,
+    };
+  }
+
+  /**
+   * 计算 image / cutout / mockup 队列项的修复元数据。
+   * 规则与 generation.ts 中 retryItem / cutoutItem / generateMockupItem 的执行前置条件保持一致，
+   * 前序依赖未满足时只标记阻塞，不自动跨阶段触发。
+   */
+  private resolveItemRepairMeta(
+    item: PodGenerationItemEntity,
+    queueKey: 'image' | 'cutout' | 'mockup',
+    batchId?: number
+  ): QueueRepairMeta {
+    if (queueKey === 'image') {
+      // 生图修复：要求 status=failed 且 promptStatus=approved，且批次未在生图。
+      if (item.status !== 'failed') {
+        return {
+          repairable: false,
+          blocked: false,
+          blockReason: '',
+          repairAction: 'retryItem',
+          repairTargetType: 'item',
+          repairTargetId: item.id,
+        };
+      }
+      if (item.promptStatus !== 'approved') {
+        return {
+          repairable: false,
+          blocked: true,
+          blockReason: '提示词未确认，需先确认提示词',
+          repairAction: 'retryItem',
+          repairTargetType: 'item',
+          repairTargetId: item.id,
+        };
+      }
+      if (
+        batchId &&
+        this.podGenerationService.isBatchMainImageRunning(batchId)
+      ) {
+        return {
+          repairable: false,
+          blocked: true,
+          blockReason: '当前批次正在生成中，请稍后修复',
+          repairAction: 'retryItem',
+          repairTargetType: 'item',
+          repairTargetId: item.id,
+        };
+      }
+      return {
+        repairable: true,
+        blocked: false,
+        blockReason: '',
+        repairAction: 'retryItem',
+        repairTargetType: 'item',
+        repairTargetId: item.id,
+      };
+    }
+
+    if (queueKey === 'cutout') {
+      // 抠图修复：要求生图成功且本地图片文件存在，且当前未在抠图。
+      if (item.cutoutStatus === 'running') {
+        return {
+          repairable: false,
+          blocked: true,
+          blockReason: '当前图片正在抠图中',
+          repairAction: 'cutoutItem',
+          repairTargetType: 'item',
+          repairTargetId: item.id,
+        };
+      }
+      if (item.status !== 'success') {
+        return {
+          repairable: false,
+          blocked: true,
+          blockReason: '需先在生图队列修复',
+          repairAction: 'cutoutItem',
+          repairTargetType: 'item',
+          repairTargetId: item.id,
+        };
+      }
+      if (!item.filePath || !fs.existsSync(item.filePath)) {
+        return {
+          repairable: false,
+          blocked: true,
+          blockReason: '当前图片文件不存在，请先重新生成',
+          repairAction: 'cutoutItem',
+          repairTargetType: 'item',
+          repairTargetId: item.id,
+        };
+      }
+      if (item.cutoutStatus !== 'failed' && item.cutoutStatus !== 'pending') {
+        // success / skipped：列表理论上不会展示，防御性处理。
+        return {
+          repairable: false,
+          blocked: false,
+          blockReason: '',
+          repairAction: 'cutoutItem',
+          repairTargetType: 'item',
+          repairTargetId: item.id,
+        };
+      }
+      return {
+        repairable: true,
+        blocked: false,
+        blockReason: '',
+        repairAction: 'cutoutItem',
+        repairTargetType: 'item',
+        repairTargetId: item.id,
+      };
+    }
+
+    // mockup 修复：要求生图成功、抠图 success/skipped、图片文件存在。
+    if (item.mockupStatus === 'running') {
+      return {
+        repairable: false,
+        blocked: true,
+        blockReason: '当前图片正在生成效果图',
+        repairAction: 'generateMockupItem',
+        repairTargetType: 'item',
+        repairTargetId: item.id,
+      };
+    }
+    if (item.status !== 'success') {
+      return {
+        repairable: false,
+        blocked: true,
+        blockReason: '需先在生图队列修复',
+        repairAction: 'generateMockupItem',
+        repairTargetType: 'item',
+        repairTargetId: item.id,
+      };
+    }
+    if (item.cutoutStatus === 'failed') {
+      return {
+        repairable: false,
+        blocked: true,
+        blockReason: '需先在抠图队列修复',
+        repairAction: 'generateMockupItem',
+        repairTargetType: 'item',
+        repairTargetId: item.id,
+      };
+    }
+    if (item.cutoutStatus === 'running') {
+      return {
+        repairable: false,
+        blocked: true,
+        blockReason: '抠图处理中，请稍后再修复效果图',
+        repairAction: 'generateMockupItem',
+        repairTargetType: 'item',
+        repairTargetId: item.id,
+      };
+    }
+    if (item.cutoutStatus !== 'success' && item.cutoutStatus !== 'skipped') {
+      // pending 等其它状态：抠图尚未完成，必须等待。
+      return {
+        repairable: false,
+        blocked: true,
+        blockReason: '抠图未完成，请等待抠图结束后再修复效果图',
+        repairAction: 'generateMockupItem',
+        repairTargetType: 'item',
+        repairTargetId: item.id,
+      };
+    }
+    if (!item.filePath || !fs.existsSync(item.filePath)) {
+      return {
+        repairable: false,
+        blocked: true,
+        blockReason: '当前图片文件不存在，请先重新生成',
+        repairAction: 'generateMockupItem',
+        repairTargetType: 'item',
+        repairTargetId: item.id,
+      };
+    }
+    if (!this.isMockupMissingItem(item) && item.mockupStatus !== 'failed') {
+      // 已成功且文件存在：列表理论上不会展示，防御性处理。
+      return {
+        repairable: false,
+        blocked: false,
+        blockReason: '',
+        repairAction: 'generateMockupItem',
+        repairTargetType: 'item',
+        repairTargetId: item.id,
+      };
+    }
+    return {
+      repairable: true,
+      blocked: false,
+      blockReason: '',
+      repairAction: 'generateMockupItem',
+      repairTargetType: 'item',
+      repairTargetId: item.id,
+    };
+  }
+
   private isMockupMissingItem(item: PodGenerationItemEntity) {
     if (item.cutoutStatus === 'failed' || item.cutoutStatus === 'running') {
       return false;
@@ -527,4 +765,324 @@ export class PodGenerationImportService extends BaseService {
     }
     return !fs.existsSync(item.mockupFilePath);
   }
+
+  /**
+   * 单项队列修复：按 queueKey 分发到已有能力，执行前再做一次阻塞兜底校验。
+   * 复用 PodGenerationService，不重写状态机。
+   */
+  async repairQueueItem(params: {
+    importId: number;
+    queueKey: string;
+    targetId: number;
+    targetType: 'row' | 'item';
+  }) {
+    const importId = Number(params?.importId);
+    const targetId = Number(params?.targetId);
+    const queueKey = String(params?.queueKey || '');
+    const targetType = String(params?.targetType || 'item');
+    if (!importId || !Number.isFinite(importId)) {
+      throw new CoolCommException('缺少参数 importId');
+    }
+    if (!targetId || !Number.isFinite(targetId)) {
+      throw new CoolCommException('缺少参数 targetId');
+    }
+    if (!['importPrompt', 'image', 'cutout', 'mockup'].includes(queueKey)) {
+      throw new CoolCommException('队列类型不合法');
+    }
+    if (!['row', 'item'].includes(targetType)) {
+      throw new CoolCommException('修复目标类型不合法');
+    }
+
+    if (queueKey === 'importPrompt') {
+      return this.repairImportPromptQueueItem(importId, targetId);
+    }
+    return this.repairItemQueueItem(
+      importId,
+      queueKey as 'image' | 'cutout' | 'mockup',
+      targetId
+    );
+  }
+
+  private async repairImportPromptQueueItem(importId: number, rowId: number) {
+    const row = await this.rowEntity.findOneBy({ id: rowId });
+    if (!row || row.importId !== importId) {
+      throw new CoolCommException('导入行不存在或不属于当前导入记录');
+    }
+    if (
+      row.batchId &&
+      this.podGenerationService.isBatchMainImageRunning(row.batchId)
+    ) {
+      throw new CoolCommException('当前批次正在生成中，请稍后修复');
+    }
+    const updated = await this.podGenerationService.repairImportRow(rowId);
+    return {
+      importId,
+      queueKey: 'importPrompt',
+      targetType: 'row' as const,
+      targetId: rowId,
+      rowNo: row.rowNo,
+      status: 'repaired',
+      item: updated,
+    };
+  }
+
+  private async repairItemQueueItem(
+    importId: number,
+    queueKey: 'image' | 'cutout' | 'mockup',
+    itemId: number
+  ) {
+    const item = await this.itemEntity.findOneBy({ id: itemId });
+    if (!item) {
+      throw new CoolCommException('任务项不存在');
+    }
+    const belong = await this.assertItemBelongsToImport(item, importId);
+    const meta = this.resolveItemRepairMeta(item, queueKey, item.batchId);
+    if (meta.blocked) {
+      return {
+        importId,
+        queueKey,
+        targetType: 'item' as const,
+        targetId: itemId,
+        rowNo: belong.rowNo,
+        itemNo: item.itemNo,
+        status: 'blocked',
+        message: meta.blockReason,
+      };
+    }
+    if (!meta.repairable) {
+      return {
+        importId,
+        queueKey,
+        targetType: 'item' as const,
+        targetId: itemId,
+        rowNo: belong.rowNo,
+        itemNo: item.itemNo,
+        status: 'skipped',
+        message: '当前状态无需修复',
+      };
+    }
+
+    const result = await this.dispatchItemRepair(queueKey, itemId);
+    return {
+      importId,
+      queueKey,
+      targetType: 'item' as const,
+      targetId: itemId,
+      rowNo: belong.rowNo,
+      itemNo: item.itemNo,
+      status: 'repaired',
+      item: result,
+    };
+  }
+
+  /**
+   * 批量队列修复：按 importId + queueKey 直接查询数据库全部候选失败项，
+   * 不依赖 queueStats().items（避免 20 条截断）。
+   * 顺序执行可修复项，单个失败不影响后续；阻塞项跳过并记录原因。
+   */
+  async repairQueue(params: { importId: number; queueKey: string }) {
+    const importId = Number(params?.importId);
+    const queueKey = String(params?.queueKey || '');
+    if (!importId || !Number.isFinite(importId)) {
+      throw new CoolCommException('缺少参数 importId');
+    }
+    if (!['importPrompt', 'image', 'cutout', 'mockup'].includes(queueKey)) {
+      throw new CoolCommException('队列类型不合法');
+    }
+
+    const candidates = await this.collectQueueRepairCandidates(
+      importId,
+      queueKey as QueueKey
+    );
+
+    const results: any[] = [];
+    let repaired = 0;
+    let blocked = 0;
+    let failed = 0;
+
+    for (const candidate of candidates) {
+      try {
+        const meta = candidate.meta;
+        if (meta.blocked) {
+          blocked += 1;
+          results.push({
+            targetType: candidate.targetType,
+            targetId: candidate.targetId,
+            rowNo: candidate.rowNo,
+            itemNo: candidate.itemNo,
+            status: 'blocked',
+            message: meta.blockReason,
+          });
+          continue;
+        }
+        if (!meta.repairable) {
+          results.push({
+            targetType: candidate.targetType,
+            targetId: candidate.targetId,
+            rowNo: candidate.rowNo,
+            itemNo: candidate.itemNo,
+            status: 'skipped',
+            message: '当前状态无需修复',
+          });
+          continue;
+        }
+        await this.dispatchCandidateRepair(candidate);
+        repaired += 1;
+        results.push({
+          targetType: candidate.targetType,
+          targetId: candidate.targetId,
+          rowNo: candidate.rowNo,
+          itemNo: candidate.itemNo,
+          status: 'repaired',
+        });
+      } catch (err: any) {
+        failed += 1;
+        results.push({
+          targetType: candidate.targetType,
+          targetId: candidate.targetId,
+          rowNo: candidate.rowNo,
+          itemNo: candidate.itemNo,
+          status: 'failed',
+          message: this.compactError(err),
+        });
+      }
+    }
+
+    return {
+      importId,
+      queueKey,
+      total: candidates.length,
+      repaired,
+      blocked,
+      failed,
+      results,
+    };
+  }
+
+  private async collectQueueRepairCandidates(
+    importId: number,
+    queueKey: QueueKey
+  ): Promise<QueueRepairCandidate[]> {
+    const rows = await this.rowEntity.find({
+      where: { importId },
+      order: { rowNo: 'ASC', id: 'ASC' },
+    });
+    const batchIds = rows.map(row => row.batchId).filter(Boolean);
+    const rowByBatchMap = new Map(rows.map(row => [row.batchId, row]));
+
+    if (queueKey === 'importPrompt') {
+      const candidates: QueueRepairCandidate[] = [];
+      for (const row of rows) {
+        if (row.status !== 'failed') {
+          // 批量修复仅收 failed 项；pending 属于正常等待，应走"继续执行"语义。
+          continue;
+        }
+        const meta = this.buildImportPromptQueueItem(row);
+        candidates.push({
+          queueKey,
+          targetType: 'row',
+          targetId: row.id,
+          rowNo: row.rowNo,
+          itemNo: null,
+          meta,
+        });
+      }
+      return candidates;
+    }
+
+    const items = batchIds.length
+      ? await this.itemEntity.find({
+          where: { batchId: In(batchIds) },
+          order: { id: 'ASC' },
+        })
+      : [];
+
+    return items
+      .filter(item => {
+        if (queueKey === 'image') {
+          return item.status === 'failed';
+        }
+        if (queueKey === 'cutout') {
+          return item.status === 'success' && item.cutoutStatus === 'failed';
+        }
+        // mockup
+        return (
+          item.status === 'success' &&
+          (item.mockupStatus === 'failed' || this.isMockupMissingItem(item)) &&
+          !this.isWaitingCutoutForMockup(item)
+        );
+      })
+      .map(item => {
+        const row = rowByBatchMap.get(item.batchId);
+        const meta = this.resolveItemRepairMeta(item, queueKey, item.batchId);
+        return {
+          queueKey,
+          targetType: 'item' as const,
+          targetId: item.id,
+          rowNo: row?.rowNo || null,
+          itemNo: item.itemNo,
+          meta,
+        };
+      });
+  }
+
+  private async assertItemBelongsToImport(
+    item: PodGenerationItemEntity,
+    importId: number
+  ) {
+    const row = await this.rowEntity.findOneBy({ batchId: item.batchId });
+    if (!row || row.importId !== importId) {
+      throw new CoolCommException('任务项不属于当前导入记录');
+    }
+    return { rowNo: row.rowNo };
+  }
+
+  private async dispatchItemRepair(
+    queueKey: 'image' | 'cutout' | 'mockup',
+    itemId: number
+  ) {
+    if (queueKey === 'image') {
+      return this.podGenerationService.retryItem(itemId);
+    }
+    if (queueKey === 'cutout') {
+      return this.podGenerationService.cutoutItem(itemId);
+    }
+    return this.podGenerationService.generateMockupItem(itemId);
+  }
+
+  private async dispatchCandidateRepair(candidate: QueueRepairCandidate) {
+    if (candidate.targetType === 'row') {
+      return this.podGenerationService.repairImportRow(candidate.targetId);
+    }
+    return this.dispatchItemRepair(
+      candidate.queueKey as 'image' | 'cutout' | 'mockup',
+      candidate.targetId
+    );
+  }
+
+  private compactError(err: any) {
+    const raw = err?.message || String(err || '未知错误');
+    const compact = String(raw).replace(/\s+/g, ' ').trim();
+    return compact.length > 200 ? `${compact.slice(0, 200)}...` : compact;
+  }
+}
+
+type QueueKey = 'importPrompt' | 'image' | 'cutout' | 'mockup';
+
+interface QueueRepairMeta {
+  repairable: boolean;
+  blocked: boolean;
+  blockReason: string;
+  repairAction: string;
+  repairTargetType: 'row' | 'item';
+  repairTargetId: number;
+}
+
+interface QueueRepairCandidate {
+  queueKey: QueueKey;
+  targetType: 'row' | 'item';
+  targetId: number;
+  rowNo: number | null;
+  itemNo: string | null;
+  meta: QueueRepairMeta;
 }
